@@ -1,6 +1,7 @@
 <?php
 session_start();
 require_once __DIR__ . '/../../Classes/Commercant.php';
+require_once __DIR__ . '/../../Classes/Produit.php';
 require_once __DIR__ . '/../../Classes/Database.php';
 
 // Vérifier si l'utilisateur est connecté
@@ -14,12 +15,110 @@ if (!$commercant->isLoggedIn()) {
 $user = $commercant->getLoggedInUser();
 if (!$user) {
     session_destroy();
-    header('Location: /pages/Client/login.php?error=session_expired');
+    header('Location: ../../login.php?error=session_expired');
     exit;
 }
 
 $id_commercant = $user->getIdCommercant();
 $id_user = $user->getIdUser();
+
+$db = Database::getInstance()->getConnection();
+
+// =============================================
+// GESTION DES NOTIFICATIONS
+// =============================================
+
+// Marquer une notification comme lue
+if (isset($_GET['mark_read']) && is_numeric($_GET['mark_read'])) {
+    $id_notif = intval($_GET['mark_read']);
+    $stmt = $db->prepare("UPDATE notifications SET is_read = 1 WHERE id_notification = ? AND id_commercant = ?");
+    $stmt->execute([$id_notif, $id_commercant]);
+    header('Location: dashboard.php');
+    exit;
+}
+
+// Marquer toutes les notifications comme lues
+if (isset($_GET['mark_all_read'])) {
+    $stmt = $db->prepare("UPDATE notifications SET is_read = 1 WHERE id_commercant = ?");
+    $stmt->execute([$id_commercant]);
+    header('Location: dashboard.php');
+    exit;
+}
+
+// Supprimer une notification
+if (isset($_GET['delete_notif']) && is_numeric($_GET['delete_notif'])) {
+    $id_notif = intval($_GET['delete_notif']);
+    $stmt = $db->prepare("DELETE FROM notifications WHERE id_notification = ? AND id_commercant = ?");
+    $stmt->execute([$id_notif, $id_commercant]);
+    header('Location: dashboard.php');
+    exit;
+}
+
+// Récupérer les notifications
+$stmt = $db->prepare("
+    SELECT * FROM notifications 
+    WHERE id_commercant = ? 
+    ORDER BY created_at DESC 
+    LIMIT 50
+");
+$stmt->execute([$id_commercant]);
+$notifications = $stmt->fetchAll();
+
+// Compter les notifications non lues
+$stmt = $db->prepare("SELECT COUNT(*) as total FROM notifications WHERE id_commercant = ? AND is_read = 0");
+$stmt->execute([$id_commercant]);
+$unread_count = $stmt->fetch()['total'];
+
+// Récupérer les 5 dernières notifications non lues
+$stmt = $db->prepare("
+    SELECT * FROM notifications 
+    WHERE id_commercant = ? AND is_read = 0 
+    ORDER BY created_at DESC 
+    LIMIT 5
+");
+$stmt->execute([$id_commercant]);
+$recent_notifications = $stmt->fetchAll();
+
+// Traitement du formulaire d'ajout de produit
+$message = '';
+$message_type = '';
+$produit_data = null;
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'add_product') {
+    $produitObj = new Produit();
+    
+    $data = [
+        'nom_produit' => trim($_POST['nom_produit'] ?? ''),
+        'description' => trim($_POST['description'] ?? ''),
+        'prix_unitaire' => floatval($_POST['prix_unitaire'] ?? 0),
+        'quantite_stock' => intval($_POST['quantite_stock'] ?? 0),
+        'unite' => trim($_POST['unite'] ?? 'pièce'),
+        'id_commercant' => $id_commercant
+    ];
+    
+    if (empty($data['nom_produit'])) {
+        $message = '❌ Le nom du produit est requis';
+        $message_type = 'error';
+        $produit_data = (object) $data;
+    } elseif ($data['prix_unitaire'] <= 0) {
+        $message = '❌ Le prix unitaire doit être supérieur à 0';
+        $message_type = 'error';
+        $produit_data = (object) $data;
+    } else {
+        $result = $produitObj->create($data);
+        
+        if ($result['success']) {
+            $message = '✅ ' . $result['message'];
+            $message_type = 'success';
+            $produit_data = null;
+            $produits = $commercant->getProduits($id_commercant);
+        } else {
+            $message = '❌ ' . $result['error'];
+            $message_type = 'error';
+            $produit_data = (object) $data;
+        }
+    }
+}
 
 // Récupérer les données
 $etalages = $commercant->getEtalages($id_commercant);
@@ -27,8 +126,7 @@ $locations = $commercant->getLocations($id_commercant);
 $produits = $commercant->getProduits($id_commercant);
 $paiements = $commercant->getPaiements($id_commercant);
 
-// Récupérer tous les étalages disponibles (pour la location)
-$db = Database::getInstance()->getConnection();
+// Récupérer tous les étalages disponibles
 $stmt = $db->prepare("
     SELECT e.*, s.designation as secteur_nom 
     FROM etalage e
@@ -39,11 +137,41 @@ $stmt = $db->prepare("
 $stmt->execute();
 $etalages_disponibles = $stmt->fetchAll();
 
+// Unités disponibles
+$unites_disponibles = [
+    'pièce' => 'Pièce',
+    'kg' => 'Kilogramme (kg)',
+    'g' => 'Gramme (g)',
+    'litre' => 'Litre',
+    'sac' => 'Sac',
+    'botte' => 'Botte',
+    'douzaine' => 'Douzaine',
+    'carton' => 'Carton',
+    'bouteille' => 'Bouteille',
+    'paquet' => 'Paquet'
+];
+
 // Statistiques
 $total_etalages = count($etalages);
 $total_produits = count($produits);
 $total_locations = count($locations);
 $total_paiements = array_sum(array_column($paiements, 'montant'));
+
+// En haut du dashboard.php, après la connexion
+// Récupérer les notifications non lues
+$stmt = $db->prepare("SELECT COUNT(*) as total FROM notifications WHERE id_commercant = ? AND is_read = 0");
+$stmt->execute([$id_commercant]);
+$unread_count = $stmt->fetch()['total'];
+
+// Récupérer les 5 dernières notifications non lues
+$stmt = $db->prepare("
+    SELECT * FROM notifications 
+    WHERE id_commercant = ? AND is_read = 0 
+    ORDER BY created_at DESC 
+    LIMIT 5
+");
+$stmt->execute([$id_commercant]);
+$recent_notifications = $stmt->fetchAll();
 
 $page_title = 'Dashboard - Marché Virunga';
 ?>
@@ -54,13 +182,8 @@ $page_title = 'Dashboard - Marché Virunga';
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $page_title ?></title>
     
-    <!-- Tailwind CSS via CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    
-    <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     
     <style>
@@ -77,6 +200,8 @@ $page_title = 'Dashboard - Marché Virunga';
         .btn-primary:hover { background: #2d6a9f; transform: scale(1.02); }
         .btn-outline { border: 2px solid #1e3a5f; color: #1e3a5f; transition: all 0.3s ease; }
         .btn-outline:hover { background: #1e3a5f; color: white; }
+        .btn-danger { background: #ef4444; color: white; transition: all 0.3s ease; }
+        .btn-danger:hover { background: #dc2626; transform: scale(1.02); }
         
         .stat-card { transition: all 0.3s ease; }
         .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
@@ -93,7 +218,137 @@ $page_title = 'Dashboard - Marché Virunga';
         
         .modal-overlay { background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
         
-        /* Scrollbar personnalisée */
+        .toast {
+            animation: slideInRight 0.5s ease forwards;
+        }
+        
+        @keyframes slideInRight {
+            from {
+                opacity: 0;
+                transform: translateX(100px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .input-focus:focus {
+            border-color: #f59e0b;
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+        }
+        
+        /* ============================================ */
+        /* STYLES DES NOTIFICATIONS */
+        /* ============================================ */
+        .notification-bell {
+            position: relative;
+            cursor: pointer;
+            transition: transform 0.3s ease;
+        }
+        .notification-bell:hover {
+            transform: scale(1.1);
+        }
+        .notification-badge {
+            position: absolute;
+            top: -8px;
+            right: -8px;
+            background: #ef4444;
+            color: white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            font-size: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            animation: pulse-badge 2s infinite;
+        }
+        @keyframes pulse-badge {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        
+        .notification-dropdown {
+            position: absolute;
+            top: 100%;
+            right: 0;
+            width: 380px;
+            max-height: 400px;
+            overflow-y: auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.15);
+            display: none;
+            z-index: 1000;
+            margin-top: 10px;
+            border: 1px solid #e5e7eb;
+        }
+        .notification-dropdown.show {
+            display: block;
+            animation: slideDown 0.3s ease forwards;
+        }
+        @keyframes slideDown {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .notification-item {
+            padding: 12px 16px;
+            border-bottom: 1px solid #f3f4f6;
+            transition: background 0.2s ease;
+            cursor: pointer;
+        }
+        .notification-item:hover {
+            background: #f9fafb;
+        }
+        .notification-item.unread {
+            background: #f0f7ff;
+            border-left: 3px solid #f59e0b;
+        }
+        .notification-item .notif-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+        .notification-item .notif-icon.success { background: #dcfce7; color: #16a34a; }
+        .notification-item .notif-icon.warning { background: #fef3c7; color: #d97706; }
+        .notification-item .notif-icon.info { background: #dbeafe; color: #2563eb; }
+        .notification-item .notif-icon.error { background: #fee2e2; color: #dc2626; }
+        
+        .notification-time {
+            font-size: 11px;
+            color: #9ca3af;
+        }
+        
+        .notification-empty {
+            padding: 30px;
+            text-align: center;
+            color: #9ca3af;
+        }
+        .notification-empty i {
+            font-size: 40px;
+            margin-bottom: 10px;
+            opacity: 0.5;
+        }
+        
+        /* Scrollbar personnalisée pour les notifications */
+        .notification-dropdown::-webkit-scrollbar { width: 4px; }
+        .notification-dropdown::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .notification-dropdown::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 10px; }
+        
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 10px; }
@@ -103,7 +358,7 @@ $page_title = 'Dashboard - Marché Virunga';
 <body class="bg-gray-50">
 
 <!-- ============================================ -->
-<!-- NAVIGATION -->
+<!-- NAVIGATION AVEC NOTIFICATIONS -->
 <!-- ============================================ -->
 <nav class="bg-primary text-white shadow-lg sticky top-0 z-50">
     <div class="max-w-7xl mx-auto px-4">
@@ -123,7 +378,100 @@ $page_title = 'Dashboard - Marché Virunga';
                         <?= htmlspecialchars($user->getMatricule()) ?>
                     </span>
                 </div>
-                <a href="/api/auth/logout.php" class="text-sm bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition flex items-center">
+                
+                <!-- ============================================ -->
+                <!-- ICÔNE DE NOTIFICATION AVEC MENU DÉROULANT -->
+                <!-- ============================================ -->
+                <div class="relative notification-bell" id="notificationWrapper">
+                    <button onclick="toggleNotifications()" class="relative text-white hover:text-accent transition">
+                        <i class="fas fa-bell text-xl"></i>
+                        <?php if ($unread_count > 0): ?>
+                            <span class="notification-badge"><?= $unread_count > 99 ? '99+' : $unread_count ?></span>
+                        <?php endif; ?>
+                    </button>
+                    
+                    <!-- Menu déroulant des notifications -->
+                    <div class="notification-dropdown" id="notificationDropdown">
+                        <div class="flex items-center justify-between p-3 border-b border-gray-200 bg-gray-50 rounded-t-xl">
+                            <span class="font-semibold text-gray-700 text-sm">
+                                <i class="fas fa-bell mr-2 text-accent"></i>
+                                Notifications
+                            </span>
+                            <div class="flex gap-2">
+                                <?php if ($unread_count > 0): ?>
+                                    <a href="?mark_all_read=1" class="text-xs text-accent hover:text-accent/80 transition">
+                                        <i class="fas fa-check-double mr-1"></i> Tout marquer lu
+                                    </a>
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                        
+                        <div class="notification-list">
+                            <?php if (count($recent_notifications) > 0): ?>
+                                <?php foreach ($recent_notifications as $notif): ?>
+                                    <div class="notification-item unread">
+                                        <div class="flex items-start gap-3">
+                                            <div class="notif-icon <?= $notif['type'] ?>">
+                                                <?php if ($notif['type'] == 'success'): ?>
+                                                    <i class="fas fa-check-circle"></i>
+                                                <?php elseif ($notif['type'] == 'warning'): ?>
+                                                    <i class="fas fa-exclamation-triangle"></i>
+                                                <?php elseif ($notif['type'] == 'error'): ?>
+                                                    <i class="fas fa-times-circle"></i>
+                                                <?php else: ?>
+                                                    <i class="fas fa-info-circle"></i>
+                                                <?php endif; ?>
+                                            </div>
+                                            <div class="flex-1 min-w-0">
+                                                <p class="text-sm font-medium text-gray-800"><?= htmlspecialchars($notif['title']) ?></p>
+                                                <p class="text-xs text-gray-600 truncate"><?= htmlspecialchars($notif['message']) ?></p>
+                                                <p class="text-xs text-gray-400 mt-1">
+                                                    <?= date('d/m/Y H:i', strtotime($notif['created_at'])) ?>
+                                                </p>
+                                            </div>
+                                            <div class="flex flex-col items-end gap-1 flex-shrink-0">
+                                                <?php if ($notif['lien']): ?>
+                                                    <a href="<?= $notif['lien'] ?>" class="text-xs text-accent hover:text-accent/80">
+                                                        <i class="fas fa-arrow-right"></i>
+                                                    </a>
+                                                <?php endif; ?>
+                                                <a href="?mark_read=<?= $notif['id_notification'] ?>" class="text-xs text-gray-400 hover:text-gray-600" title="Marquer comme lu">
+                                                    <i class="fas fa-check"></i>
+                                                </a>
+                                                <a href="?delete_notif=<?= $notif['id_notification'] ?>" class="text-xs text-gray-400 hover:text-red-600" title="Supprimer" onclick="return confirm('Supprimer cette notification ?')">
+                                                    <i class="fas fa-times"></i>
+                                                </a>
+                                            </div>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                                
+                                <?php if ($unread_count > 5): ?>
+                                    <div class="p-3 text-center border-t border-gray-200">
+                                        <span class="text-xs text-gray-500">
+                                            +<?= $unread_count - 5 ?> notification(s) non lue(s)
+                                        </span>
+                                    </div>
+                                <?php endif; ?>
+                                
+                                <div class="p-3 text-center border-t border-gray-200">
+                                    <a href="#tab-locations" onclick="showTab('locations'); closeNotifications();" class="text-xs text-accent hover:text-accent/80 transition">
+                                        <i class="fas fa-eye mr-1"></i> Voir toutes les notifications
+                                    </a>
+                                </div>
+                                
+                            <?php else: ?>
+                                <div class="notification-empty">
+                                    <i class="fas fa-bell-slash"></i>
+                                    <p class="text-sm">Aucune notification</p>
+                                    <p class="text-xs mt-1">Vous serez notifié des mises à jour</p>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </div>
+                
+                <a href="../../login.php" class="text-sm bg-white/20 hover:bg-white/30 px-4 py-2 rounded-lg transition flex items-center">
                     <i class="fas fa-sign-out-alt mr-1"></i>
                     <span class="hidden sm:inline">Déconnexion</span>
                 </a>
@@ -165,9 +513,25 @@ $page_title = 'Dashboard - Marché Virunga';
                         <i class="fas fa-store mr-1"></i> Location active
                     </span>
                 <?php endif; ?>
+                <?php if ($unread_count > 0): ?>
+                    <span class="bg-red-100 text-red-700 px-3 py-1 rounded-full text-sm flex items-center animate-pulse">
+                        <i class="fas fa-bell mr-1"></i> <?= $unread_count ?> notification(s)
+                    </span>
+                <?php endif; ?>
             </div>
         </div>
     </div>
+
+    <!-- Message de notification -->
+    <?php if ($message): ?>
+        <div class="mb-6 p-4 rounded-lg flex items-start toast <?= $message_type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700' ?>">
+            <i class="fas <?= $message_type === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle' ?> mt-0.5 mr-3 text-lg"></i>
+            <div><?= $message ?></div>
+            <button onclick="this.parentElement.style.display='none'" class="ml-auto text-gray-400 hover:text-gray-600">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    <?php endif; ?>
 
     <!-- Statistiques -->
     <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
@@ -233,6 +597,12 @@ $page_title = 'Dashboard - Marché Virunga';
                 <button onclick="showTab('locations')" class="tab-inactive px-6 py-3 text-sm font-medium transition" id="tab-locations">
                     <i class="fas fa-handshake mr-2"></i>Mes locations
                 </button>
+                <?php if ($unread_count > 0): ?>
+                    <button onclick="showTab('notifications')" class="tab-inactive px-6 py-3 text-sm font-medium transition relative" id="tab-notifications">
+                        <i class="fas fa-bell mr-2"></i>Notifications
+                        <span class="ml-1 bg-red-500 text-white text-xs px-1.5 py-0.5 rounded-full"><?= $unread_count ?></span>
+                    </button>
+                <?php endif; ?>
             </nav>
         </div>
     </div>
@@ -330,14 +700,14 @@ $page_title = 'Dashboard - Marché Virunga';
                                 <p class="text-xs text-gray-500"><?= htmlspecialchars($produit['unite'] ?? 'pièce') ?></p>
                             </div>
                             <div class="flex gap-1">
-                                <button onclick="editProduct(<?= $produit['id_produit'] ?>)" 
-                                        class="text-blue-600 hover:text-blue-800 p-1">
+                                <a href="modifier_produit.php?id=<?= $produit['id_produit'] ?>" 
+                                   class="text-blue-600 hover:text-blue-800 p-1 transition" title="Modifier">
                                     <i class="fas fa-edit"></i>
-                                </button>
-                                <button onclick="deleteProduct(<?= $produit['id_produit'] ?>)" 
-                                        class="text-red-600 hover:text-red-800 p-1">
+                                </a>
+                                <a href="supprimer_produit.php?id=<?= $produit['id_produit'] ?>" 
+                                   class="text-red-600 hover:text-red-800 p-1 transition" title="Supprimer">
                                     <i class="fas fa-trash"></i>
-                                </button>
+                                </a>
                             </div>
                         </div>
                         <div class="mt-2 text-xs text-gray-400">
@@ -351,7 +721,7 @@ $page_title = 'Dashboard - Marché Virunga';
                 <div class="text-6xl text-gray-300 mb-4">
                     <i class="fas fa-boxes"></i>
                 </div>
-                <h3 className="text-xl font-semibold text-gray-700 mb-2">Aucun produit</h3>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun produit</h3>
                 <p class="text-gray-500 mb-4">Commencez à ajouter vos produits à vendre.</p>
                 <button onclick="openModal('addProduct')" class="btn-accent px-6 py-2 rounded-lg font-semibold">
                     <i class="fas fa-plus mr-2"></i> Ajouter un produit
@@ -400,10 +770,10 @@ $page_title = 'Dashboard - Marché Virunga';
                                     Prêt à être loué
                                 </p>
                             </div>
-                            <button onclick="demanderLocation(<?= $etalage['id_etalage'] ?>)" 
-                                    class="w-full mt-4 btn-accent py-2 rounded-lg font-semibold">
+                            <a href="confirmer_demande.php?id=<?= $etalage['id_etalage'] ?>" 
+                               class="w-full mt-4 btn-accent py-2 rounded-lg font-semibold inline-block text-center">
                                 <i class="fas fa-handshake mr-2"></i> Demander la location
-                            </button>
+                            </a>
                         </div>
                     </div>
                 <?php endforeach; ?>
@@ -413,7 +783,7 @@ $page_title = 'Dashboard - Marché Virunga';
                 <div class="text-6xl text-gray-300 mb-4">
                     <i class="fas fa-store"></i>
                 </div>
-                <h3 className="text-xl font-semibold text-gray-700 mb-2">Aucun étalage disponible</h3>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun étalage disponible</h3>
                 <p class="text-gray-500">Tous les étalages sont actuellement occupés. Revenez plus tard.</p>
             </div>
         <?php endif; ?>
@@ -477,11 +847,92 @@ $page_title = 'Dashboard - Marché Virunga';
                 <div class="text-6xl text-gray-300 mb-4">
                     <i class="fas fa-handshake"></i>
                 </div>
-                <h3 className="text-xl font-semibold text-gray-700 mb-2">Aucune location</h3>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune location</h3>
                 <p class="text-gray-500">Vous n'avez pas encore de location active.</p>
             </div>
         <?php endif; ?>
     </div>
+
+    <!-- ============================================ -->
+    <!-- TAB 5: TOUTES LES NOTIFICATIONS -->
+    <!-- ============================================ -->
+  <!-- Menu déroulant des notifications -->
+<div id="content-notifications" class="tab-content hidden">
+    <div class="flex justify-between items-center mb-4">
+        <h2 class="text-xl font-bold text-primary">
+            <i class="fas fa-bell text-accent mr-2"></i>Toutes les notifications
+        </h2>
+        <div class="flex gap-2">
+            <?php if ($unread_count > 0): ?>
+                <button onclick="markAllAsRead()" class="btn-outline px-3 py-1 rounded-lg text-sm font-semibold">
+                    <i class="fas fa-check-double mr-1"></i> Tout marquer lu
+                </button>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <?php if (count($notifications) > 0): ?>
+        <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+            <div class="divide-y divide-gray-200">
+                <?php foreach ($notifications as $notif): ?>
+                    <div class="notification-tab-item p-4 <?= $notif['is_read'] ? 'bg-white' : 'bg-blue-50 border-l-4 border-accent' ?> hover:bg-gray-50 transition" data-id="<?= $notif['id_notification'] ?>">
+                        <div class="flex items-start gap-3">
+                            <div class="notif-icon <?= $notif['type'] ?> flex-shrink-0">
+                                <?php if ($notif['type'] == 'success'): ?>
+                                    <i class="fas fa-check-circle"></i>
+                                <?php elseif ($notif['type'] == 'warning'): ?>
+                                    <i class="fas fa-exclamation-triangle"></i>
+                                <?php elseif ($notif['type'] == 'error'): ?>
+                                    <i class="fas fa-times-circle"></i>
+                                <?php else: ?>
+                                    <i class="fas fa-info-circle"></i>
+                                <?php endif; ?>
+                            </div>
+                            <div class="flex-1">
+                                <div class="flex items-center justify-between">
+                                    <p class="font-semibold text-gray-800"><?= htmlspecialchars($notif['title']) ?></p>
+                                    <div class="flex gap-2">
+                                        <?php if (!$notif['is_read']): ?>
+                                            <span class="text-xs bg-accent/20 text-accent-700 px-2 py-0.5 rounded-full animate-pulse">Nouveau</span>
+                                        <?php endif; ?>
+                                        <button onclick="markAsRead(<?= $notif['id_notification'] ?>)" 
+                                                class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
+                                            <i class="fas fa-check"></i>
+                                        </button>
+                                        <button onclick="deleteNotification(<?= $notif['id_notification'] ?>)" 
+                                                class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <p class="text-sm text-gray-600"><?= htmlspecialchars($notif['message']) ?></p>
+                                <div class="flex items-center justify-between mt-1">
+                                    <p class="text-xs text-gray-400">
+                                        <i class="far fa-clock mr-1"></i>
+                                        <?= date('d/m/Y à H:i', strtotime($notif['created_at'])) ?>
+                                    </p>
+                                    <?php if ($notif['lien']): ?>
+                                        <a href="<?= $notif['lien'] ?>" class="text-xs text-accent hover:text-accent/80 transition">
+                                            Voir plus <i class="fas fa-arrow-right ml-1"></i>
+                                        </a>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+    <?php else: ?>
+        <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+            <div class="text-6xl text-gray-300 mb-4">
+                <i class="fas fa-bell-slash"></i>
+            </div>
+            <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune notification</h3>
+            <p class="text-gray-500">Vous n'avez pas encore de notifications.</p>
+        </div>
+    <?php endif; ?>
+</div>
 
 </div>
 
@@ -499,44 +950,49 @@ $page_title = 'Dashboard - Marché Virunga';
             </button>
         </div>
         
-        <form id="form-addProduct" method="POST" action="/api/produits/ajouter.php">
+        <form id="form-addProduct" method="POST" action="">
+            <input type="hidden" name="action" value="add_product">
             <input type="hidden" name="id_commercant" value="<?= $id_commercant ?>">
             
             <div class="mb-3">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Nom du produit <span class="text-red-500">*</span></label>
                 <input type="text" name="nom_produit" required 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
+                       value="<?= htmlspecialchars($produit_data->nom_produit ?? '') ?>"
+                       placeholder="Ex: Tomates fraîches"
+                       class="w-full px-3 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
             </div>
             
             <div class="mb-3">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
                 <textarea name="description" rows="2" 
-                          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"></textarea>
+                          placeholder="Décrivez votre produit..."
+                          class="w-full px-3 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"><?= htmlspecialchars($produit_data->description ?? '') ?></textarea>
             </div>
             
             <div class="grid grid-cols-2 gap-3 mb-3">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Prix unitaire (FCFA) <span class="text-red-500">*</span></label>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Prix (FCFA) <span class="text-red-500">*</span></label>
                     <input type="number" name="prix_unitaire" required min="0" step="100"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
+                           value="<?= htmlspecialchars($produit_data->prix_unitaire ?? '') ?>"
+                           placeholder="0"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Quantité en stock</label>
-                    <input type="number" name="quantite_stock" min="0" value="0"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
+                    <input type="number" name="quantite_stock" min="0" 
+                           value="<?= htmlspecialchars($produit_data->quantite_stock ?? 0) ?>"
+                           class="w-full px-3 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                 </div>
             </div>
             
             <div class="mb-4">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Unité de mesure</label>
-                <select name="unite" class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="pièce">Pièce</option>
-                    <option value="kg">Kilogramme (kg)</option>
-                    <option value="g">Gramme (g)</option>
-                    <option value="litre">Litre</option>
-                    <option value="sac">Sac</option>
-                    <option value="botte">Botte</option>
-                    <option value="douzaine">Douzaine</option>
+                <select name="unite" class="w-full px-3 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
+                    <?php foreach ($unites_disponibles as $value => $label): ?>
+                        <option value="<?= $value ?>" <?= (($produit_data->unite ?? 'pièce') == $value) ? 'selected' : '' ?>>
+                            <?= $label ?>
+                        </option>
+                    <?php endforeach; ?>
                 </select>
             </div>
             
@@ -548,58 +1004,26 @@ $page_title = 'Dashboard - Marché Virunga';
 </div>
 
 <!-- ============================================ -->
-<!-- MODAL: DEMANDER LOCATION -->
-<!-- ============================================ -->
-<div id="modal-location" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-handshake text-accent mr-2"></i>Demander la location
-            </h3>
-            <button onclick="closeModal('location')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <p class="text-gray-600 mb-4">Confirmez votre demande de location pour cet étalage.</p>
-        
-        <form id="form-location" method="POST" action="/api/locations/demander.php">
-            <input type="hidden" name="id_commercant" value="<?= $id_commercant ?>">
-            <input type="hidden" name="id_etalage" id="location_etalage_id">
-            
-            <div class="bg-gray-50 rounded-lg p-4 mb-4">
-                <p class="text-sm text-gray-600">
-                    <i class="fas fa-info-circle text-accent mr-1"></i>
-                    Un agent du marché vous contactera pour finaliser la location.
-                </p>
-            </div>
-            
-            <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                <i class="fas fa-paper-plane mr-2"></i> Confirmer la demande
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
 <!-- SCRIPTS -->
 <!-- ============================================ -->
 <script>
     // Gestion des tabs
     function showTab(tabName) {
-        // Cacher tous les contenus
         document.querySelectorAll('.tab-content').forEach(el => {
             el.classList.add('hidden');
         });
+        const content = document.getElementById('content-' + tabName);
+        if (content) {
+            content.classList.remove('hidden');
+        }
         
-        // Afficher le contenu sélectionné
-        document.getElementById('content-' + tabName).classList.remove('hidden');
-        
-        // Mettre à jour les onglets
         document.querySelectorAll('#tab-nav button').forEach(btn => {
             btn.className = 'tab-inactive px-6 py-3 text-sm font-medium transition';
         });
-        document.getElementById('tab-' + tabName).className = 'tab-active px-6 py-3 text-sm font-medium transition';
+        const tabBtn = document.getElementById('tab-' + tabName);
+        if (tabBtn) {
+            tabBtn.className = 'tab-active px-6 py-3 text-sm font-medium transition';
+        }
     }
     
     // Gestion des modals
@@ -615,11 +1039,26 @@ $page_title = 'Dashboard - Marché Virunga';
         document.body.style.overflow = 'auto';
     }
     
-    // Demander une location
-    function demanderLocation(etalageId) {
-        document.getElementById('location_etalage_id').value = etalageId;
-        openModal('location');
+    // ============================================
+    // GESTION DES NOTIFICATIONS
+    // ============================================
+    function toggleNotifications() {
+        const dropdown = document.getElementById('notificationDropdown');
+        dropdown.classList.toggle('show');
     }
+    
+    function closeNotifications() {
+        const dropdown = document.getElementById('notificationDropdown');
+        dropdown.classList.remove('show');
+    }
+    
+    // Fermer les notifications en cliquant à l'extérieur
+    document.addEventListener('click', function(e) {
+        const wrapper = document.getElementById('notificationWrapper');
+        if (wrapper && !wrapper.contains(e.target)) {
+            closeNotifications();
+        }
+    });
     
     // Fermer les modals en cliquant à l'extérieur
     document.querySelectorAll('.modal-overlay').forEach(modal => {
@@ -642,45 +1081,185 @@ $page_title = 'Dashboard - Marché Virunga';
         alert('Fonctionnalité à venir: Modification de l\'étalage #' + id);
     }
     
-    // Modifier un produit
-    function editProduct(id) {
-        alert('Fonctionnalité à venir: Modification du produit #' + id);
-    }
-    
-    // Supprimer un produit
-    function deleteProduct(id) {
-        if (confirm('Êtes-vous sûr de vouloir supprimer ce produit ?')) {
-            window.location.href = '/api/produits/supprimer.php?id=' + id;
-        }
-    }
-    
     // Soumission du formulaire produit
     document.getElementById('form-addProduct').addEventListener('submit', function(e) {
-        // Validation supplémentaire
         const nom = this.querySelector('input[name="nom_produit"]').value.trim();
         const prix = this.querySelector('input[name="prix_unitaire"]').value;
         
         if (!nom) {
             e.preventDefault();
-            alert('Veuillez entrer un nom de produit.');
+            alert('❌ Veuillez entrer un nom de produit.');
+            this.querySelector('input[name="nom_produit"]').focus();
             return false;
         }
-        if (!prix || prix <= 0) {
+        if (!prix || parseFloat(prix) <= 0) {
             e.preventDefault();
-            alert('Veuillez entrer un prix valide.');
+            alert('❌ Veuillez entrer un prix valide.');
+            this.querySelector('input[name="prix_unitaire"]').focus();
+            return false;
+        }
+        if (nom.length < 2) {
+            e.preventDefault();
+            alert('❌ Le nom doit contenir au moins 2 caractères.');
+            this.querySelector('input[name="nom_produit"]').focus();
             return false;
         }
     });
+
+    // ============================================
+// GESTION AVANCÉE DES NOTIFICATIONS
+// ============================================
+
+// Marquer une notification comme lue avec AJAX
+function markAsRead(notifId) {
+    fetch('/pages/Commercant/ajax/mark_notification_read.php', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: 'id=' + notifId
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Supprimer la notification du menu déroulant
+            const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
+            if (notifElement) {
+                notifElement.style.opacity = '0';
+                notifElement.style.transform = 'translateX(50px)';
+                setTimeout(() => {
+                    notifElement.remove();
+                    updateNotificationBadge();
+                }, 300);
+            }
+            // Mettre à jour l'onglet notifications
+            const tabNotif = document.querySelector(`.notification-tab-item[data-id="${notifId}"]`);
+            if (tabNotif) {
+                tabNotif.style.opacity = '0';
+                setTimeout(() => {
+                    tabNotif.remove();
+                    updateNotificationBadge();
+                }, 300);
+            }
+        }
+    })
+    .catch(error => console.error('Erreur:', error));
+}
+
+// Marquer toutes les notifications comme lues
+function markAllAsRead() {
+    if (!confirm('Marquer toutes les notifications comme lues ?')) return;
     
-    // Soumission du formulaire location
-    document.getElementById('form-location').addEventListener('submit', function(e) {
-        const idEtalage = this.querySelector('input[name="id_etalage"]').value;
-        if (!idEtalage) {
-            e.preventDefault();
-            alert('Veuillez sélectionner un étalage.');
-            return false;
+    fetch('/pages/Commercant/ajax/mark_all_read.php', {
+        method: 'POST'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
         }
+    })
+    .catch(error => console.error('Erreur:', error));
+}
+
+// Mettre à jour le badge de notification
+function updateNotificationBadge() {
+    const badge = document.querySelector('.notification-badge');
+    const notifItems = document.querySelectorAll('.notification-item.unread');
+    const count = notifItems.length;
+    
+    if (badge) {
+        if (count > 0) {
+            badge.textContent = count > 99 ? '99+' : count;
+            badge.style.display = 'flex';
+        } else {
+            badge.style.display = 'none';
+        }
+    }
+    
+    // Mettre à jour l'onglet notifications
+    const tabNotifBadge = document.querySelector('#tab-notifications .ml-1');
+    if (tabNotifBadge) {
+        if (count > 0) {
+            tabNotifBadge.textContent = count;
+            tabNotifBadge.style.display = 'inline';
+        } else {
+            tabNotifBadge.style.display = 'none';
+        }
+    }
+}
+
+// Supprimer une notification
+function deleteNotification(notifId) {
+    if (!confirm('Supprimer cette notification ?')) return;
+    
+    fetch('/pages/Commercant/ajax/delete_notification.php', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: 'id=' + notifId
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
+            if (notifElement) {
+                notifElement.remove();
+                updateNotificationBadge();
+            }
+        }
+    })
+    .catch(error => console.error('Erreur:', error));
+}
+
+// Ouvrir une notification (marquer comme lue et rediriger)
+function openNotification(notifId, lien) {
+    if (lien) {
+        // Marquer comme lue avant de rediriger
+        fetch('/pages/Commercant/ajax/mark_notification_read.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'id=' + notifId
+        })
+        .then(() => {
+            window.location.href = lien;
+        });
+    }
+}
+
+// Auto-fermeture du dropdown après clic
+document.addEventListener('click', function(e) {
+    const wrapper = document.getElementById('notificationWrapper');
+    if (wrapper && !wrapper.contains(e.target)) {
+        closeNotifications();
+    }
+});
+
+// Auto-disparition des notifications après 5 secondes (optionnel)
+function autoDismissNotifications() {
+    const notifItems = document.querySelectorAll('.notification-item.unread');
+    notifItems.forEach((item, index) => {
+        setTimeout(() => {
+            const notifId = item.dataset.id;
+            if (notifId) {
+                markAsRead(notifId);
+            }
+        }, 5000 + (index * 1000)); // 5s + 1s par notification
     });
+}
+
+// Appeler autoDismissNotifications au chargement (optionnel)
+// document.addEventListener('DOMContentLoaded', autoDismissNotifications);
+    
+    // Si un message de succès est affiché, fermer le modal automatiquement
+    <?php if ($message_type === 'success'): ?>
+        setTimeout(function() {
+            closeModal('addProduct');
+        }, 1000);
+    <?php endif; ?>
 </script>
 
 </body>
