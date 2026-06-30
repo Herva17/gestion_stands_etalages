@@ -173,28 +173,62 @@ class Etalage {
     
     /**
      * Mettre à jour un étalage
+     * Accepte soit un tableau associatif, soit des paramètres individuels
      */
     public function update($id_etalage, $data) {
-        try {
-            $sql = "UPDATE etalage SET 
-                        numero = ?,
-                        localisation = ?,
-                        statut = ?,
-                        id_secteur = ?
-                    WHERE id_etalage = ?";
-            
-            $stmt = $this->db->prepare($sql);
-            $stmt->execute([
-                $data['numero'],
-                $data['localisation'] ?? '',
-                $data['statut'] ?? 'disponible',
-                $data['id_secteur'],
-                $id_etalage
-            ]);
-            
-            return ['success' => true, 'message' => 'Étalage mis à jour avec succès'];
-        } catch (PDOException $e) {
-            return ['success' => false, 'error' => 'Erreur: ' . $e->getMessage()];
+        // Si $data est un tableau associatif (style clé => valeur)
+        if (is_array($data)) {
+            try {
+                $sql = "UPDATE etalage SET 
+                            numero = ?,
+                            localisation = ?,
+                            statut = ?,
+                            id_secteur = ?
+                        WHERE id_etalage = ?";
+                
+                $stmt = $this->db->prepare($sql);
+                $stmt->execute([
+                    $data['numero'],
+                    $data['localisation'] ?? '',
+                    $data['statut'] ?? 'disponible',
+                    $data['id_secteur'],
+                    $id_etalage
+                ]);
+                
+                return ['success' => true, 'message' => 'Étalage mis à jour avec succès'];
+            } catch (PDOException $e) {
+                return ['success' => false, 'error' => 'Erreur: ' . $e->getMessage()];
+            }
+        } 
+        // Si des paramètres individuels sont passés (compatibilité ascendante)
+        else {
+            // Récupérer les arguments passés
+            $args = func_get_args();
+            // Le premier argument est l'ID, le deuxième est le numéro, etc.
+            if (count($args) >= 4) {
+                $numero = $args[1] ?? '';
+                $localisation = $args[2] ?? '';
+                $id_secteur = $args[3] ?? '';
+                $statut = $args[4] ?? 'disponible';
+                
+                try {
+                    $sql = "UPDATE etalage SET 
+                                numero = ?,
+                                localisation = ?,
+                                statut = ?,
+                                id_secteur = ?
+                            WHERE id_etalage = ?";
+                    
+                    $stmt = $this->db->prepare($sql);
+                    $stmt->execute([$numero, $localisation, $statut, $id_secteur, $id_etalage]);
+                    
+                    return ['success' => true, 'message' => 'Étalage mis à jour avec succès'];
+                } catch (PDOException $e) {
+                    return ['success' => false, 'error' => 'Erreur: ' . $e->getMessage()];
+                }
+            } else {
+                return ['success' => false, 'error' => 'Paramètres insuffisants pour la mise à jour'];
+            }
         }
     }
     
@@ -321,3 +355,4 @@ class Etalage {
         ];
     }
 }
+?>

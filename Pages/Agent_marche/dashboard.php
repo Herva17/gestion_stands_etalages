@@ -30,6 +30,136 @@ $id_agent = $user->getIdAgent();
 $db = Database::getInstance()->getConnection();
 
 // =============================================
+// GESTION DES DEMANDES DE LOCATION
+// =============================================
+
+// Valider une demande
+if (isset($_GET['valider']) && is_numeric($_GET['valider'])) {
+    $id_location = intval($_GET['valider']);
+    
+    try {
+        $db->beginTransaction();
+        
+        // Mettre à jour le statut de la location
+        $stmt = $db->prepare("UPDATE location SET status = 'approuve' WHERE id_location = ?");
+        $stmt->execute([$id_location]);
+        
+        // Récupérer les informations pour la notification
+        $stmt = $db->prepare("
+            SELECT l.id_commercant, e.numero as etalage_numero
+            FROM location l
+            INNER JOIN etalage e ON l.id_etalage = e.id_etalage
+            WHERE l.id_location = ?
+        ");
+        $stmt->execute([$id_location]);
+        $info = $stmt->fetch();
+        
+        if ($info) {
+            // Mettre à jour le statut de l'étalage
+            $stmt = $db->prepare("
+                UPDATE etalage SET statut = 'occupe' 
+                WHERE id_etalage = (SELECT id_etalage FROM location WHERE id_location = ?)
+            ");
+            $stmt->execute([$id_location]);
+            
+            // Notifier le commerçant
+            $stmt = $db->prepare("
+                INSERT INTO notifications (id_commercant, type, title, message, lien) 
+                VALUES (?, 'success', '✅ Demande approuvée', 
+                        'Votre demande pour l\'étalage #" . $info['etalage_numero'] . " a été approuvée. Vous pouvez maintenant occuper votre étalage.',
+                        '/pages/Commercant/dashboard.php#tab-locations')
+            ");
+            $stmt->execute([$info['id_commercant']]);
+        }
+        
+        $db->commit();
+        header('Location: dashboard.php?success=demande_validee');
+        exit;
+        
+    } catch (Exception $e) {
+        $db->rollBack();
+        header('Location: dashboard.php?error=' . urlencode($e->getMessage()));
+        exit;
+    }
+}
+
+// Refuser une demande
+if (isset($_GET['refuser']) && is_numeric($_GET['refuser'])) {
+    $id_location = intval($_GET['refuser']);
+    
+    try {
+        $db->beginTransaction();
+        
+        // Mettre à jour le statut de la location
+        $stmt = $db->prepare("UPDATE location SET status = 'refuse' WHERE id_location = ?");
+        $stmt->execute([$id_location]);
+        
+        // Récupérer les informations pour la notification
+        $stmt = $db->prepare("
+            SELECT l.id_commercant, e.numero as etalage_numero
+            FROM location l
+            INNER JOIN etalage e ON l.id_etalage = e.id_etalage
+            WHERE l.id_location = ?
+        ");
+        $stmt->execute([$id_location]);
+        $info = $stmt->fetch();
+        
+        if ($info) {
+            // Remettre l'étalage disponible
+            $stmt = $db->prepare("
+                UPDATE etalage SET statut = 'disponible' 
+                WHERE id_etalage = (SELECT id_etalage FROM location WHERE id_location = ?)
+            ");
+            $stmt->execute([$id_location]);
+            
+            // Notifier le commerçant
+            $stmt = $db->prepare("
+                INSERT INTO notifications (id_commercant, type, title, message, lien) 
+                VALUES (?, 'error', '❌ Demande refusée', 
+                        'Votre demande pour l\'étalage #" . $info['etalage_numero'] . " a été refusée. Veuillez contacter l\'administration pour plus d\'informations.',
+                        '/pages/Commercant/dashboard.php#tab-locations')
+            ");
+            $stmt->execute([$info['id_commercant']]);
+        }
+        
+        $db->commit();
+        header('Location: dashboard.php?success=demande_refusee');
+        exit;
+        
+    } catch (Exception $e) {
+        $db->rollBack();
+        header('Location: dashboard.php?error=' . urlencode($e->getMessage()));
+        exit;
+    }
+}
+
+// Libérer un étalage
+if (isset($_GET['liberer']) && is_numeric($_GET['liberer'])) {
+    $id_etalage = intval($_GET['liberer']);
+    
+    try {
+        $db->beginTransaction();
+        
+        // Mettre à jour le statut de l'étalage
+        $stmt = $db->prepare("UPDATE etalage SET statut = 'disponible' WHERE id_etalage = ?");
+        $stmt->execute([$id_etalage]);
+        
+        // Mettre à jour la location associée
+        $stmt = $db->prepare("UPDATE location SET status = 'termine' WHERE id_etalage = ? AND status = 'actif'");
+        $stmt->execute([$id_etalage]);
+        
+        $db->commit();
+        header('Location: dashboard.php?success=etalage_libere');
+        exit;
+        
+    } catch (Exception $e) {
+        $db->rollBack();
+        header('Location: dashboard.php?error=' . urlencode($e->getMessage()));
+        exit;
+    }
+}
+
+// =============================================
 // GESTION DES NOTIFICATIONS
 // =============================================
 
@@ -84,6 +214,23 @@ $stmt = $db->prepare("
 $stmt->execute([$id_agent]);
 $recent_notifications = $stmt->fetchAll();
 
+// Récupérer les demandes en attente
+$stmt = $db->prepare("
+    SELECT l.*, e.numero as etalage_numero, e.localisation, s.designation as secteur_nom,
+           u.nom_complet as commercant_nom, u.matricule as commercant_matricule,
+           u.telephone as commercant_telephone
+    FROM location l
+    INNER JOIN etalage e ON l.id_etalage = e.id_etalage
+    LEFT JOIN secteur s ON e.id_secteur = s.id_secteur
+    INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+    INNER JOIN utilisateurs u ON c.id_user = u.id_user
+    WHERE l.status = 'en_attente'
+    ORDER BY l.created_at DESC
+");
+$stmt->execute();
+$demandes_attente = $stmt->fetchAll();
+$nb_demandes_attente = count($demandes_attente);
+
 // Initialiser les classes
 $etalage = new Etalage();
 $secteur = new Secteur();
@@ -97,6 +244,8 @@ $stats = ['total_etalages' => 0, 'etalages_disponibles' => 0, 'etalages_occupes'
 $allEtalages = [];
 $etalages_disponibles = [];
 $etalages_occupes = [];
+$etalages_payes = [];
+$etalages_attente_paiement = [];
 $secteurs = [];
 $commercants = [];
 $locations = [];
@@ -142,6 +291,90 @@ try {
 } catch (Exception $e) {
     error_log("Erreur lors de la récupération des étalages occupés: " . $e->getMessage());
     $etalages_occupes = [];
+}
+
+// =============================================
+// RÉCUPÉRATION DES ÉTALAGES PAR STATUT DE PAIEMENT
+// =============================================
+
+// Récupérer les étalages occupés (payés)
+try {
+    $stmt = $db->prepare("
+        SELECT DISTINCT e.*, 
+               s.designation as secteur_nom,
+               u.nom_complet as commercant_nom,
+               l.id_location, l.date_debut, l.date_fin, l.montant_location,
+               p.id_paiement as paiement_id
+        FROM etalage e
+        INNER JOIN location l ON e.id_etalage = l.id_etalage
+        LEFT JOIN secteur s ON e.id_secteur = s.id_secteur
+        INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+        INNER JOIN utilisateurs u ON c.id_user = u.id_user
+        INNER JOIN paiement p ON l.id_location = p.id_location
+        WHERE e.statut = 'occupe'
+        AND l.status = 'actif'
+        GROUP BY e.id_etalage
+        ORDER BY e.numero
+    ");
+    $etalages_payes = $stmt->fetchAll();
+} catch (Exception $e) {
+    error_log("Erreur lors de la récupération des étalages payés: " . $e->getMessage());
+    $etalages_payes = [];
+}
+
+// Récupérer les étalages occupés (payés)
+try {
+    $stmt = $db->prepare("
+        SELECT DISTINCT e.*, 
+               s.designation as secteur_nom,
+               u.nom_complet as commercant_nom,
+               l.id_location, l.date_debut, l.date_fin, l.montant_location,
+               p.id_paiement as paiement_id,
+               p.montant as paiement_montant,
+               p.mode_paiement,
+               p.date_paiement,
+               p.reference as paiement_reference
+        FROM etalage e
+        INNER JOIN location l ON e.id_etalage = l.id_etalage
+        LEFT JOIN secteur s ON e.id_secteur = s.id_secteur
+        INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+        INNER JOIN utilisateurs u ON c.id_user = u.id_user
+        INNER JOIN paiement p ON l.id_location = p.id_location
+        WHERE e.statut = 'occupe'
+        AND l.status = 'actif'
+        AND p.statut = 'valide'
+        GROUP BY e.id_etalage
+        ORDER BY e.numero
+    ");
+    $etalages_payes = $stmt->fetchAll();
+} catch (Exception $e) {
+    error_log("Erreur lors de la récupération des étalages payés: " . $e->getMessage());
+    $etalages_payes = [];
+}
+
+// Récupérer les étalages en attente de paiement (loués mais non payés)
+try {
+    $stmt = $db->prepare("
+        SELECT DISTINCT e.*, 
+               s.designation as secteur_nom,
+               u.nom_complet as commercant_nom,
+               l.id_location, l.date_debut, l.date_fin, l.montant_location
+        FROM etalage e
+        INNER JOIN location l ON e.id_etalage = l.id_etalage
+        LEFT JOIN secteur s ON e.id_secteur = s.id_secteur
+        INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+        INNER JOIN utilisateurs u ON c.id_user = u.id_user
+        LEFT JOIN paiement p ON l.id_location = p.id_location AND p.statut = 'valide'
+        WHERE e.statut = 'occupe'
+        AND l.statut = 'actif'
+        AND p.id_paiement IS NULL
+        GROUP BY e.id_etalage
+        ORDER BY e.numero
+    ");
+    $etalages_attente_paiement = $stmt->fetchAll();
+} catch (Exception $e) {
+    error_log("Erreur lors de la récupération des étalages en attente de paiement: " . $e->getMessage());
+    $etalages_attente_paiement = [];
 }
 
 try {
@@ -202,12 +435,13 @@ $agent_matricule = $user->getMatriculeAgent();
 if (!isset($allEtalages)) $allEtalages = [];
 if (!isset($etalages_disponibles)) $etalages_disponibles = [];
 if (!isset($etalages_occupes)) $etalages_occupes = [];
+if (!isset($etalages_payes)) $etalages_payes = [];
+if (!isset($etalages_attente_paiement)) $etalages_attente_paiement = [];
 if (!isset($secteurs)) $secteurs = [];
 if (!isset($commercants)) $commercants = [];
 if (!isset($locations)) $locations = [];
 if (!isset($paiements)) $paiements = [];
 ?>
-
 
 <!DOCTYPE html>
 <html lang="fr">
@@ -261,8 +495,6 @@ if (!isset($paiements)) $paiements = [];
         .tab-inactive { color: #6b7280; border-bottom: 3px solid transparent; }
         .tab-inactive:hover { color: #1e3a5f; border-bottom-color: #d1d5db; }
         
-        .modal-overlay { background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
-        
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
         ::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 10px; }
@@ -278,6 +510,8 @@ if (!isset($paiements)) $paiements = [];
         .status-occupe { background: #fee2e2; color: #991b1b; }
         .status-en-attente { background: #fef3c7; color: #92400e; }
         .status-actif { background: #dbeafe; color: #1e40af; }
+        .status-paye { background: #dcfce7; color: #166534; border: 1px solid #22c55e; }
+        .status-attente-paiement { background: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
         
         .glass-effect {
             background: rgba(255,255,255,0.7);
@@ -309,9 +543,7 @@ if (!isset($paiements)) $paiements = [];
             transform: scale(1.05);
         }
 
-        /* ============================================ */
-        /* STYLES DES NOTIFICATIONS */
-        /* ============================================ */
+        /* Styles des notifications */
         .notification-bell {
             position: relative;
             cursor: pointer;
@@ -422,9 +654,7 @@ if (!isset($paiements)) $paiements = [];
 </head>
 <body class="bg-gray-50">
 
-<!-- ============================================ -->
-<!-- NAVIGATION AVEC NOTIFICATIONS -->
-<!-- ============================================ -->
+<!-- Navigation -->
 <nav class="bg-primary text-white shadow-lg sticky top-0 z-50">
     <div class="max-w-7xl mx-auto px-4">
         <div class="flex justify-between items-center h-16">
@@ -444,9 +674,7 @@ if (!isset($paiements)) $paiements = [];
                     </span>
                 </div>
                 
-                <!-- ============================================ -->
-                <!-- ICÔNE DE NOTIFICATION AVEC MENU DÉROULANT -->
-                <!-- ============================================ -->
+                <!-- Icône de notification -->
                 <div class="relative notification-bell" id="notificationWrapper">
                     <button onclick="toggleNotifications()" class="relative text-white hover:text-accent transition">
                         <i class="fas fa-bell text-xl"></i>
@@ -464,9 +692,9 @@ if (!isset($paiements)) $paiements = [];
                             </span>
                             <div class="flex gap-2">
                                 <?php if ($unread_count > 0): ?>
-                                    <button onclick="markAllAsRead()" class="text-xs text-accent hover:text-accent/80 transition">
+                                    <a href="dashboard.php?mark_all_read=1" class="text-xs text-accent hover:text-accent/80 transition">
                                         <i class="fas fa-check-double mr-1"></i> Tout marquer lu
-                                    </button>
+                                    </a>
                                 <?php endif; ?>
                                 <button onclick="closeNotifications()" class="text-xs text-gray-400 hover:text-gray-600">
                                     <i class="fas fa-times"></i>
@@ -477,7 +705,7 @@ if (!isset($paiements)) $paiements = [];
                         <div class="notification-list">
                             <?php if (count($recent_notifications) > 0): ?>
                                 <?php foreach ($recent_notifications as $notif): ?>
-                                    <div class="notification-item unread" data-id="<?= $notif['id_notification'] ?>" onclick="openNotification(<?= $notif['id_notification'] ?>, '<?= $notif['lien'] ?>')">
+                                    <div class="notification-item unread" data-id="<?= $notif['id_notification'] ?>">
                                         <div class="flex items-start gap-3">
                                             <div class="notif-icon <?= $notif['type'] ?>">
                                                 <?php if ($notif['type'] == 'success'): ?>
@@ -499,14 +727,15 @@ if (!isset($paiements)) $paiements = [];
                                                 </p>
                                             </div>
                                             <div class="flex flex-col items-end gap-1 flex-shrink-0">
-                                                <button onclick="event.stopPropagation(); markAsRead(<?= $notif['id_notification'] ?>)" 
-                                                        class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
+                                                <a href="dashboard.php?mark_read=<?= $notif['id_notification'] ?>" 
+                                                   class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
                                                     <i class="fas fa-check"></i>
-                                                </button>
-                                                <button onclick="event.stopPropagation(); deleteNotification(<?= $notif['id_notification'] ?>)" 
-                                                        class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer">
+                                                </a>
+                                                <a href="dashboard.php?delete_notif=<?= $notif['id_notification'] ?>" 
+                                                   class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer"
+                                                   onclick="return confirm('Supprimer cette notification ?')">
                                                     <i class="fas fa-trash"></i>
-                                                </button>
+                                                </a>
                                             </div>
                                         </div>
                                     </div>
@@ -546,10 +775,39 @@ if (!isset($paiements)) $paiements = [];
     </div>
 </nav>
 
-<!-- ============================================ -->
-<!-- CONTENU PRINCIPAL -->
-<!-- ============================================ -->
+<!-- Contenu principal -->
 <div class="max-w-7xl mx-auto px-4 py-6">
+
+    <!-- Messages de succès/erreur -->
+    <?php if (isset($_GET['success'])): ?>
+        <div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-lg mb-4 flex items-center justify-between">
+            <span>
+                <?php if ($_GET['success'] == 'demande_validee'): ?>
+                    <i class="fas fa-check-circle mr-2"></i> Demande validée avec succès !
+                <?php elseif ($_GET['success'] == 'demande_refusee'): ?>
+                    <i class="fas fa-check-circle mr-2"></i> Demande refusée avec succès !
+                <?php elseif ($_GET['success'] == 'etalage_libere'): ?>
+                    <i class="fas fa-check-circle mr-2"></i> Étalage libéré avec succès !
+                <?php elseif ($_GET['success'] == 'paiement_enregistre'): ?>
+                    <i class="fas fa-check-circle mr-2"></i> Paiement enregistré avec succès !
+                <?php endif; ?>
+            </span>
+            <button onclick="this.parentElement.remove()" class="text-green-700 hover:text-green-900">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    <?php endif; ?>
+    
+    <?php if (isset($_GET['error'])): ?>
+        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-4 flex items-center justify-between">
+            <span>
+                <i class="fas fa-exclamation-circle mr-2"></i> Erreur: <?= htmlspecialchars($_GET['error']) ?>
+            </span>
+            <button onclick="this.parentElement.remove()" class="text-red-700 hover:text-red-900">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+    <?php endif; ?>
 
     <!-- En-tête -->
     <div class="bg-white rounded-xl shadow-sm p-6 mb-6 border-l-4 border-accent">
@@ -571,21 +829,38 @@ if (!isset($paiements)) $paiements = [];
                             <i class="fas fa-bell mr-1"></i> <?= $unread_count ?> notification(s)
                         </span>
                     <?php endif; ?>
+                    <?php if ($nb_demandes_attente > 0): ?>
+                        <span class="ml-3 bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full text-xs animate-pulse">
+                            <i class="fas fa-clock mr-1"></i> <?= $nb_demandes_attente ?> demande(s) en attente
+                        </span>
+                    <?php endif; ?>
+                    <?php if (count($etalages_attente_paiement) > 0): ?>
+                        <span class="ml-3 bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full text-xs animate-pulse">
+                            <i class="fas fa-coins mr-1"></i> <?= count($etalages_attente_paiement) ?> paiement(s) en attente
+                        </span>
+                    <?php endif; ?>
                 </p>
             </div>
             <div class="flex flex-wrap gap-2 mt-2 sm:mt-0">
-                <button onclick="openModal('addEtalage')" class="btn-accent px-4 py-2 rounded-lg font-semibold flex items-center text-sm">
+                <a href="ajouter_etalage.php" class="btn-accent px-4 py-2 rounded-lg font-semibold flex items-center text-sm">
                     <i class="fas fa-plus mr-2"></i> Ajouter un étalage
-                </button>
-                <button onclick="openModal('addSecteur')" class="btn-primary px-4 py-2 rounded-lg font-semibold flex items-center text-sm">
+                </a>
+                <a href="ajouter_secteur.php" class="btn-primary px-4 py-2 rounded-lg font-semibold flex items-center text-sm">
                     <i class="fas fa-layer-group mr-2"></i> Ajouter un secteur
-                </button>
+                </a>
+                <?php if (count($etalages_attente_paiement) > 0): ?>
+                    <a href="#tab-attente_paiement" onclick="showTab('attente_paiement')" 
+                       class="btn-warning px-4 py-2 rounded-lg font-semibold flex items-center text-sm">
+                        <i class="fas fa-clock mr-2"></i> 
+                        <?= count($etalages_attente_paiement) ?> paiement(s) en attente
+                    </a>
+                <?php endif; ?>
             </div>
         </div>
     </div>
 
     <!-- Statistiques -->
-    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
+    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4 mb-6">
         <div class="stat-card bg-white rounded-xl p-4 shadow-sm">
             <div class="flex items-center justify-between">
                 <div>
@@ -611,11 +886,22 @@ if (!isset($paiements)) $paiements = [];
         <div class="stat-card bg-white rounded-xl p-4 shadow-sm">
             <div class="flex items-center justify-between">
                 <div>
-                    <p class="text-xs text-gray-500">Occupés</p>
-                    <p class="text-2xl font-bold text-red-600"><?= $stats['etalages_occupes'] ?? 0 ?></p>
+                    <p class="text-xs text-gray-500">En attente paiement</p>
+                    <p class="text-2xl font-bold text-yellow-600"><?= count($etalages_attente_paiement) ?></p>
                 </div>
-                <div class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center">
-                    <i class="fas fa-store text-red-600"></i>
+                <div class="w-10 h-10 bg-yellow-100 rounded-full flex items-center justify-center">
+                    <i class="fas fa-clock text-yellow-600"></i>
+                </div>
+            </div>
+        </div>
+        <div class="stat-card bg-white rounded-xl p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs text-gray-500">Occupés payés</p>
+                    <p class="text-2xl font-bold text-green-600"><?= count($etalages_payes) ?></p>
+                </div>
+                <div class="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
+                    <i class="fas fa-store text-emerald-600"></i>
                 </div>
             </div>
         </div>
@@ -623,7 +909,7 @@ if (!isset($paiements)) $paiements = [];
             <div class="flex items-center justify-between">
                 <div>
                     <p class="text-xs text-gray-500">Commerçants</p>
-                    <p class="text-2xl font-bold text-primary"><?= $stats['total_commercants'] ?? 0 ?></p>
+                    <p class="text-2xl font-bold text-purple-600"><?= $stats['total_commercants'] ?? 0 ?></p>
                 </div>
                 <div class="w-10 h-10 bg-purple-100 rounded-full flex items-center justify-center">
                     <i class="fas fa-users text-purple-600"></i>
@@ -638,6 +924,17 @@ if (!isset($paiements)) $paiements = [];
                 </div>
                 <div class="w-10 h-10 bg-yellow-100 rounded-full flex items-center justify-center">
                     <i class="fas fa-handshake text-yellow-600"></i>
+                </div>
+            </div>
+        </div>
+        <div class="stat-card bg-white rounded-xl p-4 shadow-sm">
+            <div class="flex items-center justify-between">
+                <div>
+                    <p class="text-xs text-gray-500">Demandes</p>
+                    <p class="text-2xl font-bold text-orange-600"><?= $nb_demandes_attente ?></p>
+                </div>
+                <div class="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center">
+                    <i class="fas fa-clock text-orange-600"></i>
                 </div>
             </div>
         </div>
@@ -669,8 +966,7 @@ if (!isset($paiements)) $paiements = [];
             <canvas id="revenueChart" height="200"></canvas>
         </div>
     </div>
-
-    <!-- Tabs Navigation -->
+        <!-- Tabs Navigation -->
     <div class="bg-white rounded-xl shadow-sm overflow-hidden mb-6">
         <div class="border-b border-gray-200 overflow-x-auto">
             <nav class="flex flex-nowrap -mb-px" id="tab-nav">
@@ -680,8 +976,26 @@ if (!isset($paiements)) $paiements = [];
                 <button onclick="showTab('disponibles')" class="tab-inactive px-6 py-3 text-sm font-medium transition whitespace-nowrap" id="tab-disponibles">
                     <i class="fas fa-check-circle mr-2"></i>Disponibles
                 </button>
+                <button onclick="showTab('attente_paiement')" class="tab-inactive px-6 py-3 text-sm font-medium transition whitespace-nowrap" id="tab-attente_paiement">
+                    <i class="fas fa-clock text-yellow-500 mr-2"></i>En attente paiement
+                    <?php if (count($etalages_attente_paiement) > 0): ?>
+                        <span class="ml-1 bg-yellow-500 text-white text-xs px-1.5 py-0.5 rounded-full"><?= count($etalages_attente_paiement) ?></span>
+                    <?php endif; ?>
+                </button>
+                <button onclick="showTab('payes')" class="tab-inactive px-6 py-3 text-sm font-medium transition whitespace-nowrap" id="tab-payes">
+                    <i class="fas fa-check-circle text-green-500 mr-2"></i>Occupés payés
+                    <?php if (count($etalages_payes) > 0): ?>
+                        <span class="ml-1 bg-green-500 text-white text-xs px-1.5 py-0.5 rounded-full"><?= count($etalages_payes) ?></span>
+                    <?php endif; ?>
+                </button>
                 <button onclick="showTab('occupes')" class="tab-inactive px-6 py-3 text-sm font-medium transition whitespace-nowrap" id="tab-occupes">
-                    <i class="fas fa-store mr-2"></i>Occupés
+                    <i class="fas fa-store mr-2"></i>Tous les occupés
+                </button>
+                <button onclick="showTab('demandes')" class="tab-inactive px-6 py-3 text-sm font-medium transition whitespace-nowrap" id="tab-demandes">
+                    <i class="fas fa-clock mr-2"></i>Demandes en attente
+                    <?php if ($nb_demandes_attente > 0): ?>
+                        <span class="ml-1 bg-yellow-500 text-white text-xs px-1.5 py-0.5 rounded-full"><?= $nb_demandes_attente ?></span>
+                    <?php endif; ?>
                 </button>
                 <button onclick="showTab('attributions')" class="tab-inactive px-6 py-3 text-sm font-medium transition whitespace-nowrap" id="tab-attributions">
                     <i class="fas fa-handshake mr-2"></i>Attributions
@@ -702,9 +1016,7 @@ if (!isset($paiements)) $paiements = [];
         </div>
     </div>
 
-    <!-- ============================================ -->
     <!-- TAB 1: TOUS LES ÉTALAGES -->
-    <!-- ============================================ -->
     <div id="content-etalages" class="tab-content">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
@@ -719,6 +1031,9 @@ if (!isset($paiements)) $paiements = [];
                         <option value="<?= $s['id_secteur'] ?>"><?= htmlspecialchars($s['designation']) ?></option>
                     <?php endforeach; ?>
                 </select>
+                <a href="ajouter_etalage.php" class="btn-accent px-4 py-1 rounded-lg font-semibold text-sm flex items-center">
+                    <i class="fas fa-plus mr-1"></i> Ajouter
+                </a>
             </div>
         </div>
 
@@ -756,20 +1071,21 @@ if (!isset($paiements)) $paiements = [];
                             </div>
                             <div class="mt-3 pt-3 border-t border-gray-100 flex gap-2">
                                 <?php if ($e['statut'] === 'disponible' || $e['statut'] === null): ?>
-                                    <button onclick="openModal('attribuer', <?= $e['id_etalage'] ?>)" 
-                                            class="flex-1 btn-accent text-sm py-1.5 rounded-lg font-semibold">
+                                    <a href="attribuer_etalage.php?id=<?= $e['id_etalage'] ?>" 
+                                       class="flex-1 btn-accent text-sm py-1.5 rounded-lg font-semibold text-center">
                                         <i class="fas fa-handshake mr-1"></i> Attribuer
-                                    </button>
+                                    </a>
                                 <?php else: ?>
-                                    <button onclick="libererEtalage(<?= $e['id_etalage'] ?>)" 
-                                            class="flex-1 btn-danger text-sm py-1.5 rounded-lg font-semibold">
+                                    <a href="dashboard.php?liberer=<?= $e['id_etalage'] ?>" 
+                                       class="flex-1 btn-danger text-sm py-1.5 rounded-lg font-semibold text-center"
+                                       onclick="return confirm('Êtes-vous sûr de vouloir libérer cet étalage ?')">
                                         <i class="fas fa-unlock mr-1"></i> Libérer
-                                    </button>
+                                    </a>
                                 <?php endif; ?>
-                                <button onclick="editEtalage(<?= $e['id_etalage'] ?>)" 
-                                        class="flex-1 btn-outline text-sm py-1.5 rounded-lg">
+                                <a href="modifier_etalage.php?id=<?= $e['id_etalage'] ?>" 
+                                   class="flex-1 btn-outline text-sm py-1.5 rounded-lg text-center">
                                     <i class="fas fa-edit mr-1"></i> Modifier
-                                </button>
+                                </a>
                             </div>
                         </div>
                     </div>
@@ -782,16 +1098,14 @@ if (!isset($paiements)) $paiements = [];
                 </div>
                 <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun étalage</h3>
                 <p class="text-gray-500">Commencez par ajouter des étalages au marché.</p>
-                <button onclick="openModal('addEtalage')" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold">
+                <a href="ajouter_etalage.php" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold inline-block">
                     <i class="fas fa-plus mr-2"></i> Ajouter un étalage
-                </button>
+                </a>
             </div>
         <?php endif; ?>
     </div>
 
-    <!-- ============================================ -->
     <!-- TAB 2: ÉTALAGES DISPONIBLES -->
-    <!-- ============================================ -->
     <div id="content-disponibles" class="tab-content hidden">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
@@ -823,10 +1137,10 @@ if (!isset($paiements)) $paiements = [];
                                 <i class="fas fa-tag text-accent mr-1"></i>
                                 Secteur: <?= htmlspecialchars($e['secteur_nom'] ?? 'Non défini') ?>
                             </p>
-                            <button onclick="openModal('attribuer', <?= $e['id_etalage'] ?>)" 
-                                    class="w-full mt-3 btn-accent py-2 rounded-lg font-semibold">
+                            <a href="attribuer_etalage.php?id=<?= $e['id_etalage'] ?>" 
+                               class="block w-full mt-3 btn-accent py-2 rounded-lg font-semibold text-center">
                                 <i class="fas fa-handshake mr-2"></i> Attribuer à un commerçant
-                            </button>
+                            </a>
                         </div>
                     </div>
                 <?php endforeach; ?>
@@ -842,9 +1156,164 @@ if (!isset($paiements)) $paiements = [];
         <?php endif; ?>
     </div>
 
-    <!-- ============================================ -->
+    <!-- TAB: ÉTALAGES EN ATTENTE DE PAIEMENT -->
+    <div id="content-attente_paiement" class="tab-content hidden">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold text-primary">
+                <i class="fas fa-clock text-yellow-500 mr-2"></i>Étalages en attente de paiement
+            </h2>
+            <span class="text-sm text-gray-500"><?= count($etalages_attente_paiement) ?> étalage(s) en attente de paiement</span>
+        </div>
+
+        <?php if (count($etalages_attente_paiement) > 0): ?>
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <?php foreach ($etalages_attente_paiement as $e): ?>
+                    <div class="bg-white rounded-xl shadow-sm overflow-hidden border-2 border-yellow-400">
+                        <div class="p-4">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <h3 class="font-bold text-primary text-lg">
+                                        Étalage #<?= htmlspecialchars($e['numero']) ?>
+                                    </h3>
+                                    <p class="text-sm text-gray-500">
+                                        <i class="fas fa-map-pin mr-1"></i>
+                                        <?= htmlspecialchars($e['localisation'] ?? 'Non spécifiée') ?>
+                                    </p>
+                                </div>
+                                <span class="status-badge status-attente-paiement">
+                                    <i class="fas fa-clock mr-1"></i> En attente
+                                </span>
+                            </div>
+                            <div class="space-y-1 text-sm">
+                                <p class="text-gray-600">
+                                    <i class="fas fa-user text-yellow-500 mr-1"></i>
+                                    Commerçant: <?= htmlspecialchars($e['commercant_nom'] ?? 'Inconnu') ?>
+                                </p>
+                                <p class="text-gray-600">
+                                    <i class="fas fa-tag text-yellow-500 mr-1"></i>
+                                    Secteur: <?= htmlspecialchars($e['secteur_nom'] ?? 'Non défini') ?>
+                                </p>
+                                <p class="text-gray-600">
+                                    <i class="fas fa-calendar text-yellow-500 mr-1"></i>
+                                    Début: <?= date('d/m/Y', strtotime($e['date_debut'])) ?>
+                                </p>
+                                <p class="text-gray-600">
+                                    <i class="fas fa-calendar text-yellow-500 mr-1"></i>
+                                    Fin: <?= date('d/m/Y', strtotime($e['date_fin'])) ?>
+                                </p>
+                                <p class="text-gray-600 font-semibold text-yellow-600">
+                                    <i class="fas fa-money-bill-wave mr-1"></i>
+                                    Montant: <?= number_format($e['montant_location'], 0, ',', ' ') ?> FCFA
+                                </p>
+                            </div>
+                            <div class="mt-3 pt-3 border-t border-gray-200 flex gap-2">
+                                <a href="enregistrer_paiement.php?location_id=<?= $e['id_location'] ?>" 
+                                   class="flex-1 btn-accent text-sm py-1.5 rounded-lg font-semibold text-center">
+                                    <i class="fas fa-coins mr-1"></i> Enregistrer paiement
+                                </a>
+                                <a href="voir_location.php?id=<?= $e['id_location'] ?>" 
+                                   class="flex-1 btn-outline text-sm py-1.5 rounded-lg text-center">
+                                    <i class="fas fa-eye mr-1"></i> Voir
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php else: ?>
+            <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+                <div class="text-6xl text-gray-300 mb-4">
+                    <i class="fas fa-check-circle text-green-500"></i>
+                </div>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun étalage en attente de paiement</h3>
+                <p class="text-gray-500">Tous les paiements sont à jour.</p>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- TAB: ÉTALAGES OCCUPÉS PAYÉS -->
+    <div id="content-payes" class="tab-content hidden">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold text-primary">
+                <i class="fas fa-check-circle text-green-500 mr-2"></i>Étalages occupés et payés
+            </h2>
+            <span class="text-sm text-gray-500"><?= count($etalages_payes) ?> étalage(s) payé(s)</span>
+        </div>
+
+        <?php if (count($etalages_payes) > 0): ?>
+            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <?php foreach ($etalages_payes as $e): ?>
+                    <div class="bg-white rounded-xl shadow-sm overflow-hidden border-2 border-green-400">
+                        <div class="p-4">
+                            <div class="flex justify-between items-start mb-2">
+                                <div>
+                                    <h3 class="font-bold text-primary text-lg">
+                                        Étalage #<?= htmlspecialchars($e['numero']) ?>
+                                    </h3>
+                                    <p class="text-sm text-gray-500">
+                                        <i class="fas fa-map-pin mr-1"></i>
+                                        <?= htmlspecialchars($e['localisation'] ?? 'Non spécifiée') ?>
+                                    </p>
+                                </div>
+                                <span class="status-badge status-paye">
+                                    <i class="fas fa-check-circle mr-1"></i> Payé
+                                </span>
+                            </div>
+                            <div class="space-y-1 text-sm">
+                                <p class="text-gray-600">
+                                    <i class="fas fa-user text-green-500 mr-1"></i>
+                                    Commerçant: <?= htmlspecialchars($e['commercant_nom'] ?? 'Inconnu') ?>
+                                </p>
+                                <p class="text-gray-600">
+                                    <i class="fas fa-tag text-green-500 mr-1"></i>
+                                    Secteur: <?= htmlspecialchars($e['secteur_nom'] ?? 'Non défini') ?>
+                                </p>
+                                <p class="text-gray-600">
+                                    <i class="fas fa-calendar text-green-500 mr-1"></i>
+                                    Début: <?= date('d/m/Y', strtotime($e['date_debut'])) ?>
+                                </p>
+                                <p class="text-gray-600">
+                                    <i class="fas fa-calendar text-green-500 mr-1"></i>
+                                    Fin: <?= date('d/m/Y', strtotime($e['date_fin'])) ?>
+                                </p>
+                                <p class="text-gray-600 font-semibold text-green-600">
+                                    <i class="fas fa-money-bill-wave mr-1"></i>
+                                    Montant: <?= number_format($e['montant_location'], 0, ',', ' ') ?> FCFA
+                                </p>
+                                <?php if ($e['paiement_id']): ?>
+                                    <p class="text-xs text-gray-500">
+                                        <i class="fas fa-receipt mr-1"></i>
+                                        Paiement #<?= $e['paiement_id'] ?>
+                                    </p>
+                                <?php endif; ?>
+                            </div>
+                            <div class="mt-3 pt-3 border-t border-gray-200 flex gap-2">
+                                <a href="dashboard.php?liberer=<?= $e['id_etalage'] ?>" 
+                                   class="flex-1 btn-danger text-sm py-1.5 rounded-lg font-semibold text-center"
+                                   onclick="return confirm('Êtes-vous sûr de vouloir libérer cet étalage ?')">
+                                    <i class="fas fa-unlock mr-1"></i> Libérer
+                                </a>
+                                <a href="voir_location.php?id=<?= $e['id_location'] ?>" 
+                                   class="flex-1 btn-outline text-sm py-1.5 rounded-lg text-center">
+                                    <i class="fas fa-eye mr-1"></i> Voir
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        <?php else: ?>
+            <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+                <div class="text-6xl text-gray-300 mb-4">
+                    <i class="fas fa-store"></i>
+                </div>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun étalage occupé payé</h3>
+                <p class="text-gray-500">Aucun étalage n'est actuellement occupé avec paiement enregistré.</p>
+            </div>
+        <?php endif; ?>
+    </div>
+
     <!-- TAB 3: ÉTALAGES OCCUPÉS -->
-    <!-- ============================================ -->
     <div id="content-occupes" class="tab-content hidden">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
@@ -880,10 +1349,11 @@ if (!isset($paiements)) $paiements = [];
                                 <i class="fas fa-tag text-accent mr-1"></i>
                                 Secteur: <?= htmlspecialchars($e['secteur_nom'] ?? 'Non défini') ?>
                             </p>
-                            <button onclick="libererEtalage(<?= $e['id_etalage'] ?>)" 
-                                    class="w-full mt-3 btn-danger py-2 rounded-lg font-semibold">
+                            <a href="dashboard.php?liberer=<?= $e['id_etalage'] ?>" 
+                               class="block w-full mt-3 btn-danger py-2 rounded-lg font-semibold text-center"
+                               onclick="return confirm('Êtes-vous sûr de vouloir libérer cet étalage ?')">
                                 <i class="fas fa-unlock mr-2"></i> Libérer l'étalage
-                            </button>
+                            </a>
                         </div>
                     </div>
                 <?php endforeach; ?>
@@ -898,18 +1368,96 @@ if (!isset($paiements)) $paiements = [];
             </div>
         <?php endif; ?>
     </div>
+        <!-- TAB 4: DEMANDES EN ATTENTE -->
+    <div id="content-demandes" class="tab-content hidden">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold text-primary">
+                <i class="fas fa-clock text-accent mr-2"></i>Demandes de location en attente
+            </h2>
+            <span class="text-sm text-gray-500"><?= $nb_demandes_attente ?> demande(s) en attente</span>
+        </div>
 
-    <!-- ============================================ -->
-    <!-- TAB 4: ATTRIBUTIONS -->
-    <!-- ============================================ -->
+        <?php if ($nb_demandes_attente > 0): ?>
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-gray-50">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Commerçant</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Étalage</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Secteur</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Montant</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Durée</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-gray-200">
+                            <?php foreach ($demandes_attente as $demande): ?>
+                                <tr class="table-row-hover">
+                                    <td class="px-4 py-3 text-sm text-gray-600">
+                                        <?= date('d/m/Y H:i', strtotime($demande['created_at'])) ?>
+                                    </td>
+                                    <td class="px-4 py-3 text-sm text-gray-600">
+                                        <div>
+                                            <p class="font-medium text-gray-800"><?= htmlspecialchars($demande['commercant_nom']) ?></p>
+                                            <p class="text-xs text-gray-500"><?= htmlspecialchars($demande['commercant_matricule']) ?></p>
+                                            <p class="text-xs text-gray-500">📞 <?= htmlspecialchars($demande['commercant_telephone'] ?? 'Non renseigné') ?></p>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3 text-sm font-medium text-gray-900">
+                                        #<?= htmlspecialchars($demande['etalage_numero']) ?>
+                                        <p class="text-xs text-gray-500"><?= htmlspecialchars($demande['localisation'] ?? '') ?></p>
+                                    </td>
+                                    <td class="px-4 py-3 text-sm text-gray-600">
+                                        <?= htmlspecialchars($demande['secteur_nom'] ?? 'Non défini') ?>
+                                    </td>
+                                    <td class="px-4 py-3 text-sm font-bold text-accent">
+                                        <?= number_format($demande['montant_location'], 0, ',', ' ') ?> FCFA
+                                    </td>
+                                    <td class="px-4 py-3 text-sm text-gray-600">
+                                        <?= htmlspecialchars($demande['duree_location']) ?>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="flex gap-2">
+                                            <a href="dashboard.php?valider=<?= $demande['id_location'] ?>" 
+                                               class="btn-success text-white px-3 py-1 rounded-lg text-sm font-semibold flex items-center"
+                                               onclick="return confirm('Confirmez-vous la validation de cette demande de location ?')">
+                                                <i class="fas fa-check mr-1"></i> Valider
+                                            </a>
+                                            <a href="dashboard.php?refuser=<?= $demande['id_location'] ?>" 
+                                               class="btn-danger text-white px-3 py-1 rounded-lg text-sm font-semibold flex items-center"
+                                               onclick="return confirm('Confirmez-vous le refus de cette demande de location ?')">
+                                                <i class="fas fa-times mr-1"></i> Refuser
+                                            </a>
+                                        </div>
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php else: ?>
+            <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+                <div class="text-6xl text-gray-300 mb-4">
+                    <i class="fas fa-check-circle"></i>
+                </div>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune demande en attente</h3>
+                <p class="text-gray-500">Toutes les demandes ont été traitées.</p>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <!-- TAB 5: ATTRIBUTIONS -->
     <div id="content-attributions" class="tab-content hidden">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
                 <i class="fas fa-handshake text-accent mr-2"></i>Historique des attributions
             </h2>
-            <button onclick="openModal('addLocation')" class="btn-accent px-4 py-2 rounded-lg font-semibold text-sm">
+            <a href="nouvelle_location.php" class="btn-accent px-4 py-2 rounded-lg font-semibold text-sm">
                 <i class="fas fa-plus mr-2"></i> Nouvelle attribution
-            </button>
+            </a>
         </div>
 
         <?php if (count($locations) > 0): ?>
@@ -958,24 +1506,26 @@ if (!isset($paiements)) $paiements = [];
                                     </td>
                                     <td class="px-4 py-3">
                                         <div class="flex gap-1">
-                                            <button onclick="viewLocation(<?= $loc['id_location'] ?>)" 
-                                                    class="action-btn btn-info text-white" title="Voir">
+                                            <a href="voir_location.php?id=<?= $loc['id_location'] ?>" 
+                                               class="action-btn btn-info text-white" title="Voir">
                                                 <i class="fas fa-eye text-xs"></i>
-                                            </button>
+                                            </a>
                                             <?php if (strtotime($loc['date_fin']) >= time()): ?>
-                                                <button onclick="editLocation(<?= $loc['id_location'] ?>)" 
-                                                        class="action-btn btn-warning text-white" title="Modifier">
+                                                <a href="modifier_location.php?id=<?= $loc['id_location'] ?>" 
+                                                   class="action-btn btn-warning text-white" title="Modifier">
                                                     <i class="fas fa-edit text-xs"></i>
-                                                </button>
-                                                <button onclick="renouvelerLocation(<?= $loc['id_location'] ?>)" 
-                                                        class="action-btn btn-success text-white" title="Renouveler">
+                                                </a>
+                                                <a href="renouveler_location.php?id=<?= $loc['id_location'] ?>" 
+                                                   class="action-btn btn-success text-white" title="Renouveler"
+                                                   onclick="return confirm('Voulez-vous renouveler cette location ?')">
                                                     <i class="fas fa-sync text-xs"></i>
-                                                </button>
+                                                </a>
                                             <?php endif; ?>
-                                            <button onclick="deleteLocation(<?= $loc['id_location'] ?>)" 
-                                                    class="action-btn btn-danger text-white" title="Supprimer">
+                                            <a href="supprimer_location.php?id=<?= $loc['id_location'] ?>" 
+                                               class="action-btn btn-danger text-white" title="Supprimer"
+                                               onclick="return confirm('Êtes-vous sûr de vouloir supprimer cette location ?')">
                                                 <i class="fas fa-trash text-xs"></i>
-                                            </button>
+                                            </a>
                                         </div>
                                     </td>
                                 </tr>
@@ -991,24 +1541,22 @@ if (!isset($paiements)) $paiements = [];
                 </div>
                 <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune attribution</h3>
                 <p class="text-gray-500">Aucune location n'a encore été enregistrée.</p>
-                <button onclick="openModal('addLocation')" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold">
+                <a href="nouvelle_location.php" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold inline-block">
                     <i class="fas fa-plus mr-2"></i> Nouvelle attribution
-                </button>
+                </a>
             </div>
         <?php endif; ?>
     </div>
 
-    <!-- ============================================ -->
-    <!-- TAB 5: COMMERÇANTS -->
-    <!-- ============================================ -->
+    <!-- TAB 6: COMMERÇANTS -->
     <div id="content-commercants" class="tab-content hidden">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
                 <i class="fas fa-users text-accent mr-2"></i>Liste des commerçants
             </h2>
-            <button onclick="openModal('addCommercant')" class="btn-accent px-4 py-2 rounded-lg font-semibold text-sm">
+            <a href="ajouter_commercant.php" class="btn-accent px-4 py-2 rounded-lg font-semibold text-sm">
                 <i class="fas fa-user-plus mr-2"></i> Ajouter un commerçant
-            </button>
+            </a>
         </div>
 
         <?php if (count($commercants) > 0): ?>
@@ -1047,18 +1595,19 @@ if (!isset($paiements)) $paiements = [];
                                     </td>
                                     <td class="px-4 py-3">
                                         <div class="flex gap-1">
-                                            <button onclick="viewCommercant(<?= $c['id_commercant'] ?>)" 
-                                                    class="action-btn btn-info text-white" title="Voir">
+                                            <a href="voir_commercant.php?id=<?= $c['id_commercant'] ?>" 
+                                               class="action-btn btn-info text-white" title="Voir">
                                                 <i class="fas fa-eye text-xs"></i>
-                                            </button>
-                                            <button onclick="editCommercant(<?= $c['id_commercant'] ?>)" 
-                                                    class="action-btn btn-warning text-white" title="Modifier">
+                                            </a>
+                                            <a href="modifier_commercant.php?id=<?= $c['id_commercant'] ?>" 
+                                               class="action-btn btn-warning text-white" title="Modifier">
                                                 <i class="fas fa-edit text-xs"></i>
-                                            </button>
-                                            <button onclick="deleteCommercant(<?= $c['id_commercant'] ?>)" 
-                                                    class="action-btn btn-danger text-white" title="Supprimer">
+                                            </a>
+                                            <a href="supprimer_commercant.php?id=<?= $c['id_commercant'] ?>" 
+                                               class="action-btn btn-danger text-white" title="Supprimer"
+                                               onclick="return confirm('Êtes-vous sûr de vouloir supprimer ce commerçant ?')">
                                                 <i class="fas fa-trash text-xs"></i>
-                                            </button>
+                                            </a>
                                         </div>
                                     </td>
                                 </tr>
@@ -1074,28 +1623,26 @@ if (!isset($paiements)) $paiements = [];
                 </div>
                 <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun commerçant</h3>
                 <p class="text-gray-500">Aucun commerçant n'est encore enregistré.</p>
-                <button onclick="openModal('addCommercant')" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold">
+                <a href="ajouter_commercant.php" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold inline-block">
                     <i class="fas fa-user-plus mr-2"></i> Ajouter un commerçant
-                </button>
+                </a>
             </div>
         <?php endif; ?>
     </div>
 
-    <!-- ============================================ -->
-    <!-- TAB 6: PAIEMENTS -->
-    <!-- ============================================ -->
+    <!-- TAB 7: PAIEMENTS -->
     <div id="content-paiements" class="tab-content hidden">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
                 <i class="fas fa-coins text-accent mr-2"></i>Historique des paiements
             </h2>
             <div class="flex gap-2">
-                <button onclick="openModal('addPaiement')" class="btn-accent px-4 py-2 rounded-lg font-semibold text-sm">
+                <a href="enregistrer_paiement.php" class="btn-accent px-4 py-2 rounded-lg font-semibold text-sm">
                     <i class="fas fa-plus mr-2"></i> Enregistrer un paiement
-                </button>
-                <button onclick="generateReport()" class="btn-primary px-4 py-2 rounded-lg font-semibold text-sm">
+                </a>
+                <a href="rapport_paiements.php" class="btn-primary px-4 py-2 rounded-lg font-semibold text-sm">
                     <i class="fas fa-file-pdf mr-2"></i> Rapport
-                </button>
+                </a>
             </div>
         </div>
 
@@ -1137,22 +1684,23 @@ if (!isset($paiements)) $paiements = [];
                                     </td>
                                     <td class="px-4 py-3">
                                         <div class="flex gap-1">
-                                            <button onclick="viewPaiement(<?= $p['id_paiement'] ?>)" 
-                                                    class="action-btn btn-info text-white" title="Voir">
+                                            <a href="voir_paiement.php?id=<?= $p['id_paiement'] ?>" 
+                                               class="action-btn btn-info text-white" title="Voir">
                                                 <i class="fas fa-eye text-xs"></i>
-                                            </button>
-                                            <button onclick="editPaiement(<?= $p['id_paiement'] ?>)" 
-                                                    class="action-btn btn-warning text-white" title="Modifier">
+                                            </a>
+                                            <a href="modifier_paiement.php?id=<?= $p['id_paiement'] ?>" 
+                                               class="action-btn btn-warning text-white" title="Modifier">
                                                 <i class="fas fa-edit text-xs"></i>
-                                            </button>
-                                            <button onclick="printRecu(<?= $p['id_paiement'] ?>)" 
-                                                    class="action-btn btn-primary text-white" title="Imprimer">
+                                            </a>
+                                            <a href="imprimer_recu.php?id=<?= $p['id_paiement'] ?>" 
+                                               class="action-btn btn-primary text-white" title="Imprimer" target="_blank">
                                                 <i class="fas fa-print text-xs"></i>
-                                            </button>
-                                            <button onclick="deletePaiement(<?= $p['id_paiement'] ?>)" 
-                                                    class="action-btn btn-danger text-white" title="Supprimer">
+                                            </a>
+                                            <a href="supprimer_paiement.php?id=<?= $p['id_paiement'] ?>" 
+                                               class="action-btn btn-danger text-white" title="Supprimer"
+                                               onclick="return confirm('Êtes-vous sûr de vouloir supprimer ce paiement ?')">
                                                 <i class="fas fa-trash text-xs"></i>
-                                            </button>
+                                            </a>
                                         </div>
                                     </td>
                                 </tr>
@@ -1168,16 +1716,14 @@ if (!isset($paiements)) $paiements = [];
                 </div>
                 <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucun paiement</h3>
                 <p class="text-gray-500">Aucun paiement n'a encore été enregistré.</p>
-                <button onclick="openModal('addPaiement')" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold">
+                <a href="enregistrer_paiement.php" class="btn-accent mt-4 px-6 py-2 rounded-lg font-semibold inline-block">
                     <i class="fas fa-plus mr-2"></i> Enregistrer un paiement
-                </button>
+                </a>
             </div>
         <?php endif; ?>
     </div>
 
-    <!-- ============================================ -->
-    <!-- TAB 7: NOTIFICATIONS -->
-    <!-- ============================================ -->
+    <!-- TAB 8: NOTIFICATIONS -->
     <div id="content-notifications" class="tab-content hidden">
         <div class="flex justify-between items-center mb-4">
             <h2 class="text-xl font-bold text-primary">
@@ -1185,7 +1731,7 @@ if (!isset($paiements)) $paiements = [];
             </h2>
             <div class="flex gap-2">
                 <?php if ($unread_count > 0): ?>
-                    <a href="?mark_all_read=1" class="btn-outline px-3 py-1 rounded-lg text-sm font-semibold">
+                    <a href="dashboard.php?mark_all_read=1" class="btn-outline px-3 py-1 rounded-lg text-sm font-semibold">
                         <i class="fas fa-check-double mr-1"></i> Tout marquer lu
                     </a>
                 <?php endif; ?>
@@ -1216,14 +1762,15 @@ if (!isset($paiements)) $paiements = [];
                                             <?php if (!$notif['is_read']): ?>
                                                 <span class="text-xs bg-accent/20 text-accent-700 px-2 py-0.5 rounded-full animate-pulse">Nouveau</span>
                                             <?php endif; ?>
-                                            <button onclick="markAsRead(<?= $notif['id_notification'] ?>)" 
-                                                    class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
+                                            <a href="dashboard.php?mark_read=<?= $notif['id_notification'] ?>" 
+                                               class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
                                                 <i class="fas fa-check"></i>
-                                            </button>
-                                            <button onclick="deleteNotification(<?= $notif['id_notification'] ?>)" 
-                                                    class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer">
+                                            </a>
+                                            <a href="dashboard.php?delete_notif=<?= $notif['id_notification'] ?>" 
+                                               class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer"
+                                               onclick="return confirm('Supprimer cette notification ?')">
                                                 <i class="fas fa-trash"></i>
-                                            </button>
+                                            </a>
                                         </div>
                                     </div>
                                     <p class="text-sm text-gray-600"><?= htmlspecialchars($notif['message']) ?></p>
@@ -1257,318 +1804,7 @@ if (!isset($paiements)) $paiements = [];
 
 </div>
 
-<!-- ============================================ -->
-<!-- MODAL: AJOUTER UN ÉTALAGE -->
-<!-- ============================================ -->
-<div id="modal-addEtalage" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-plus-circle text-accent mr-2"></i>Ajouter un étalage
-            </h3>
-            <button onclick="closeModal('addEtalage')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <form id="form-addEtalage" method="POST" action="/api/agent/ajouter_etalage.php">
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Numéro de l'étalage <span class="text-red-500">*</span></label>
-                <input type="text" name="numero" required 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: A-01, B-12">
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Localisation</label>
-                <input type="text" name="localisation" 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: Allée centrale, côté nord">
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Secteur <span class="text-red-500">*</span></label>
-                <select name="id_secteur" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="">Sélectionner un secteur</option>
-                    <?php foreach ($secteurs as $s): ?>
-                        <option value="<?= $s['id_secteur'] ?>"><?= htmlspecialchars($s['designation']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                <i class="fas fa-save mr-2"></i> Ajouter l'étalage
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
-<!-- MODAL: AJOUTER UN SECTEUR -->
-<!-- ============================================ -->
-<div id="modal-addSecteur" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-layer-group text-accent mr-2"></i>Ajouter un secteur
-            </h3>
-            <button onclick="closeModal('addSecteur')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <form id="form-addSecteur" method="POST" action="/api/agent/ajouter_secteur.php">
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Désignation du secteur <span class="text-red-500">*</span></label>
-                <input type="text" name="designation" required 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: Fruits et Légumes, Boucherie">
-            </div>
-            
-            <button type="submit" class="w-full btn-primary py-2 rounded-lg font-semibold">
-                <i class="fas fa-save mr-2"></i> Ajouter le secteur
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
-<!-- MODAL: ATTRIBUER UN ÉTALAGE -->
-<!-- ============================================ -->
-<div id="modal-attribuer" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-handshake text-accent mr-2"></i>Attribuer un étalage
-            </h3>
-            <button onclick="closeModal('attribuer')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <form id="form-attribuer" method="POST" action="/api/agent/attribuer_etalage.php">
-            <input type="hidden" name="id_etalage" id="attribuer_etalage_id">
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Commerçant <span class="text-red-500">*</span></label>
-                <select name="id_commercant" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="">Sélectionner un commerçant</option>
-                    <?php foreach ($commercants as $c): ?>
-                        <option value="<?= $c['id_commercant'] ?>"><?= htmlspecialchars($c['nom_complet']) ?> (<?= htmlspecialchars($c['matricule']) ?>)</option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <div class="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Montant (FCFA) <span class="text-red-500">*</span></label>
-                    <input type="number" name="montant_location" required min="0" step="1000"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                           placeholder="250000">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Durée (jours) <span class="text-red-500">*</span></label>
-                    <input type="number" name="duree" required min="1" value="30"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                </div>
-            </div>
-            
-            <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mb-4">
-                <p class="text-sm text-yellow-700">
-                    <i class="fas fa-info-circle mr-1"></i>
-                    La location débutera aujourd'hui et prendra fin après la durée indiquée.
-                </p>
-            </div>
-            
-            <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                <i class="fas fa-check mr-2"></i> Attribuer l'étalage
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
-<!-- MODAL: AJOUTER UN COMMERÇANT -->
-<!-- ============================================ -->
-<div id="modal-addCommercant" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-user-plus text-accent mr-2"></i>Ajouter un commerçant
-            </h3>
-            <button onclick="closeModal('addCommercant')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <form id="form-addCommercant" method="POST" action="/api/agent/ajouter_commercant.php">
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Nom complet <span class="text-red-500">*</span></label>
-                <input type="text" name="nom_complet" required 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: Jean-Pierre KABUYA">
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Téléphone <span class="text-red-500">*</span></label>
-                <input type="tel" name="telephone" required 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: 08XXXXXXXX">
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
-                <input type="email" name="email" 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: commerçant@email.com">
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Adresse</label>
-                <input type="text" name="adresse" 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: Quartier, Ville">
-            </div>
-            
-            <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                <i class="fas fa-save mr-2"></i> Ajouter le commerçant
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
-<!-- MODAL: NOUVELLE LOCATION -->
-<!-- ============================================ -->
-<div id="modal-addLocation" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-handshake text-accent mr-2"></i>Nouvelle location
-            </h3>
-            <button onclick="closeModal('addLocation')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <form id="form-addLocation" method="POST" action="/api/agent/ajouter_location.php">
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Étalage <span class="text-red-500">*</span></label>
-                <select name="id_etalage" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="">Sélectionner un étalage</option>
-                    <?php foreach ($allEtalages as $e): ?>
-                        <option value="<?= $e['id_etalage'] ?>">#<?= htmlspecialchars($e['numero']) ?> - <?= htmlspecialchars($e['localisation'] ?? '') ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Commerçant <span class="text-red-500">*</span></label>
-                <select name="id_commercant" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="">Sélectionner un commerçant</option>
-                    <?php foreach ($commercants as $c): ?>
-                        <option value="<?= $c['id_commercant'] ?>"><?= htmlspecialchars($c['nom_complet']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <div class="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Montant (FCFA) <span class="text-red-500">*</span></label>
-                    <input type="number" name="montant_location" required min="0" step="1000"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                           placeholder="250000">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Durée (mois) <span class="text-red-500">*</span></label>
-                    <input type="number" name="duree_mois" required min="1" value="1"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                </div>
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Date de début <span class="text-red-500">*</span></label>
-                <input type="date" name="date_debut" required 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-            </div>
-            
-            <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                <i class="fas fa-save mr-2"></i> Enregistrer la location
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
-<!-- MODAL: ENREGISTRER UN PAIEMENT -->
-<!-- ============================================ -->
-<div id="modal-addPaiement" class="fixed inset-0 modal-overlay hidden items-center justify-center z-50">
-    <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 p-6">
-        <div class="flex justify-between items-center mb-4">
-            <h3 class="text-xl font-bold text-primary">
-                <i class="fas fa-coins text-accent mr-2"></i>Enregistrer un paiement
-            </h3>
-            <button onclick="closeModal('addPaiement')" class="text-gray-400 hover:text-gray-600 text-2xl">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        
-        <form id="form-addPaiement" method="POST" action="/api/agent/ajouter_paiement.php">
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Commerçant <span class="text-red-500">*</span></label>
-                <select name="id_commercant" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="">Sélectionner un commerçant</option>
-                    <?php foreach ($commercants as $c): ?>
-                        <option value="<?= $c['id_commercant'] ?>"><?= htmlspecialchars($c['nom_complet']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Étalage <span class="text-red-500">*</span></label>
-                <select name="id_etalage" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                    <option value="">Sélectionner un étalage</option>
-                    <?php foreach ($allEtalages as $e): ?>
-                        <option value="<?= $e['id_etalage'] ?>">#<?= htmlspecialchars($e['numero']) ?></option>
-                    <?php endforeach; ?>
-                </select>
-            </div>
-            
-            <div class="grid grid-cols-2 gap-3 mb-3">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Montant (FCFA) <span class="text-red-500">*</span></label>
-                    <input type="number" name="montant" required min="0" step="100"
-                           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                           placeholder="50000">
-                </div>
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">Mode de paiement <span class="text-red-500">*</span></label>
-                    <select name="mode_paiement" required class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
-                        <option value="Espèces">Espèces</option>
-                        <option value="Mobile Money">Mobile Money</option>
-                        <option value="Virement">Virement</option>
-                        <option value="Chèque">Chèque</option>
-                    </select>
-                </div>
-            </div>
-            
-            <div class="mb-3">
-                <label class="block text-sm font-medium text-gray-700 mb-1">Période concernée</label>
-                <input type="text" name="periode" 
-                       class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"
-                       placeholder="Ex: Janvier 2024">
-            </div>
-            
-            <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                <i class="fas fa-save mr-2"></i> Enregistrer le paiement
-            </button>
-        </form>
-    </div>
-</div>
-
-<!-- ============================================ -->
-<!-- SCRIPTS -->
-<!-- ============================================ -->
+<!-- Scripts -->
 <script>
     // Gestion des tabs
     function showTab(tabName) {
@@ -1589,44 +1825,7 @@ if (!isset($paiements)) $paiements = [];
         }
     }
 
-    // Gestion des modals
-    function openModal(modalId, param = null) {
-        const modal = document.getElementById('modal-' + modalId);
-        if (modal) {
-            modal.classList.remove('hidden');
-            modal.classList.add('flex');
-            document.body.style.overflow = 'hidden';
-        }
-        
-        if (modalId === 'attribuer' && param) {
-            document.getElementById('attribuer_etalage_id').value = param;
-        }
-    }
-    
-    function closeModal(modalId) {
-        const modal = document.getElementById('modal-' + modalId);
-        if (modal) {
-            modal.classList.add('hidden');
-            modal.classList.remove('flex');
-            document.body.style.overflow = 'auto';
-        }
-    }
-
-    // Fermer les modals en cliquant à l'extérieur
-    document.querySelectorAll('.modal-overlay').forEach(modal => {
-        modal.addEventListener('click', function(e) {
-            if (e.target === this) {
-                this.classList.add('hidden');
-                this.classList.remove('flex');
-                document.body.style.overflow = 'auto';
-            }
-        });
-    });
-
-    // ============================================
-    // GESTION DES NOTIFICATIONS
-    // ============================================
-    
+    // Gestion des notifications
     function toggleNotifications() {
         const dropdown = document.getElementById('notificationDropdown');
         if (dropdown) {
@@ -1640,134 +1839,6 @@ if (!isset($paiements)) $paiements = [];
             dropdown.classList.remove('show');
         }
     }
-    
-    // Marquer une notification comme lue avec AJAX
-    function markAsRead(notifId) {
-        fetch('/pages/Agent/ajax/mark_notification_read.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: 'id=' + notifId
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Supprimer la notification du menu déroulant
-                const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
-                if (notifElement) {
-                    notifElement.style.opacity = '0';
-                    notifElement.style.transform = 'translateX(50px)';
-                    setTimeout(() => {
-                        notifElement.remove();
-                        updateNotificationBadge();
-                    }, 300);
-                }
-                // Mettre à jour l'onglet notifications
-                const tabNotif = document.querySelector(`.notification-tab-item[data-id="${notifId}"]`);
-                if (tabNotif) {
-                    tabNotif.style.opacity = '0';
-                    setTimeout(() => {
-                        tabNotif.remove();
-                        updateNotificationBadge();
-                    }, 300);
-                }
-                // Recharger la page pour mettre à jour le badge
-                setTimeout(() => {
-                    location.reload();
-                }, 500);
-            }
-        })
-        .catch(error => console.error('Erreur:', error));
-    }
-
-    // Marquer toutes les notifications comme lues
-    function markAllAsRead() {
-        if (!confirm('Marquer toutes les notifications comme lues ?')) return;
-        
-        fetch('/pages/Agent/ajax/mark_all_read.php', {
-            method: 'POST'
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            }
-        })
-        .catch(error => console.error('Erreur:', error));
-    }
-
-    // Supprimer une notification
-    function deleteNotification(notifId) {
-        if (!confirm('Supprimer cette notification ?')) return;
-        
-        fetch('/pages/Agent/ajax/delete_notification.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: 'id=' + notifId
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
-                if (notifElement) {
-                    notifElement.remove();
-                    updateNotificationBadge();
-                }
-                const tabNotif = document.querySelector(`.notification-tab-item[data-id="${notifId}"]`);
-                if (tabNotif) {
-                    tabNotif.remove();
-                }
-                location.reload();
-            }
-        })
-        .catch(error => console.error('Erreur:', error));
-    }
-
-    // Ouvrir une notification (marquer comme lue et rediriger)
-    function openNotification(notifId, lien) {
-        if (lien) {
-            fetch('/pages/Agent/ajax/mark_notification_read.php', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                body: 'id=' + notifId
-            })
-            .then(() => {
-                window.location.href = lien;
-            });
-        }
-    }
-
-    // Mettre à jour le badge de notification
-    function updateNotificationBadge() {
-        const badge = document.querySelector('.notification-badge');
-        const notifItems = document.querySelectorAll('.notification-item.unread');
-        const count = notifItems.length;
-        
-        if (badge) {
-            if (count > 0) {
-                badge.textContent = count > 99 ? '99+' : count;
-                badge.style.display = 'flex';
-            } else {
-                badge.style.display = 'none';
-            }
-        }
-        
-        // Mettre à jour l'onglet notifications
-        const tabNotifBadge = document.querySelector('#tab-notifications .ml-1');
-        if (tabNotifBadge) {
-            if (count > 0) {
-                tabNotifBadge.textContent = count;
-                tabNotifBadge.style.display = 'inline';
-            } else {
-                tabNotifBadge.style.display = 'none';
-            }
-        }
-    }
 
     // Fermer les notifications en cliquant à l'extérieur
     document.addEventListener('click', function(e) {
@@ -1777,110 +1848,48 @@ if (!isset($paiements)) $paiements = [];
         }
     });
 
-    // Actions pour les attributions (locations)
-    function viewLocation(id) {
-        alert('Affichage du détail de la location #' + id);
-    }
-
-    function editLocation(id) {
-        alert('Modification de la location #' + id);
-    }
-
-    function renouvelerLocation(id) {
-        if (confirm('Voulez-vous renouveler cette location ?')) {
-            alert('Renouvellement de la location #' + id);
-        }
-    }
-
-    function deleteLocation(id) {
-        if (confirm('Êtes-vous sûr de vouloir supprimer cette location ? Cette action est irréversible.')) {
-            alert('Suppression de la location #' + id);
-        }
-    }
-
-    // Actions pour les commerçants
-    function viewCommercant(id) {
-        alert('Affichage du commerçant #' + id);
-    }
-
-    function editCommercant(id) {
-        alert('Modification du commerçant #' + id);
-    }
-
-    function deleteCommercant(id) {
-        if (confirm('Êtes-vous sûr de vouloir supprimer ce commerçant ? Cette action est irréversible.')) {
-            alert('Suppression du commerçant #' + id);
-        }
-    }
-
-    // Actions pour les paiements
-    function viewPaiement(id) {
-        alert('Affichage du paiement #' + id);
-    }
-
-    function editPaiement(id) {
-        alert('Modification du paiement #' + id);
-    }
-
-    function printRecu(id) {
-        alert('Impression du reçu pour le paiement #' + id);
-    }
-
-    function deletePaiement(id) {
-        if (confirm('Êtes-vous sûr de vouloir supprimer ce paiement ? Cette action est irréversible.')) {
-            alert('Suppression du paiement #' + id);
-        }
-    }
-
-    // Générer un rapport
-    function generateReport() {
-        alert('Génération du rapport des paiements');
-    }
-
-    // Libérer un étalage
-    function libererEtalage(id) {
-        if (confirm('Êtes-vous sûr de vouloir libérer cet étalage ?')) {
-            window.location.href = '/api/agent/liberer_etalage.php?id=' + id;
-        }
-    }
-
-    // Modifier un étalage
-    function editEtalage(id) {
-        alert('Fonctionnalité à venir: Modification de l\'étalage #' + id);
-    }
-
     // Recherche et filtre
-    document.getElementById('searchEtalage')?.addEventListener('input', function() {
-        const search = this.value.toLowerCase();
-        document.querySelectorAll('#etalageGrid .etalage-card').forEach(card => {
-            const text = card.textContent.toLowerCase();
-            card.style.display = text.includes(search) ? '' : 'none';
+    const searchInput = document.getElementById('searchEtalage');
+    if (searchInput) {
+        searchInput.addEventListener('input', function() {
+            const search = this.value.toLowerCase();
+            document.querySelectorAll('#etalageGrid .etalage-card').forEach(card => {
+                const text = card.textContent.toLowerCase();
+                card.style.display = text.includes(search) ? '' : 'none';
+            });
         });
-    });
+    }
 
-    document.getElementById('filterSecteur')?.addEventListener('change', function() {
-        const secteur = this.value;
-        document.querySelectorAll('#etalageGrid .etalage-card').forEach(card => {
-            if (!secteur || card.dataset.secteur === secteur) {
-                card.style.display = '';
-            } else {
-                card.style.display = 'none';
-            }
+    const filterSelect = document.getElementById('filterSecteur');
+    if (filterSelect) {
+        filterSelect.addEventListener('change', function() {
+            const secteur = this.value;
+            document.querySelectorAll('#etalageGrid .etalage-card').forEach(card => {
+                if (!secteur || card.dataset.secteur === secteur) {
+                    card.style.display = '';
+                } else {
+                    card.style.display = 'none';
+                }
+            });
         });
-    });
+    }
 
     // Graphiques
     document.addEventListener('DOMContentLoaded', function() {
-        // Graphique des étalages
+        // Graphique des étalages avec les nouvelles catégories
         const ctx1 = document.getElementById('etalageChart')?.getContext('2d');
         if (ctx1) {
             new Chart(ctx1, {
                 type: 'doughnut',
                 data: {
-                    labels: ['Disponibles', 'Occupés'],
+                    labels: ['Disponibles', 'En attente paiement', 'Occupés payés'],
                     datasets: [{
-                        data: [<?= $stats['etalages_disponibles'] ?? 0 ?>, <?= $stats['etalages_occupes'] ?? 0 ?>],
-                        backgroundColor: ['#22c55e', '#ef4444'],
+                        data: [
+                            <?= $stats['etalages_disponibles'] ?? 0 ?>, 
+                            <?= count($etalages_attente_paiement) ?>, 
+                            <?= count($etalages_payes) ?>
+                        ],
+                        backgroundColor: ['#22c55e', '#f59e0b', '#3b82f6'],
                         borderWidth: 0
                     }]
                 },

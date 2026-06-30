@@ -4,18 +4,18 @@ require_once __DIR__ . '/Database.php';
 class Paiement {
     private $db;
     private $id_paiement;
-    private $date_paiement;
+    private $id_location;
     private $montant;
     private $mode_paiement;
-    private $periode;
-    private $id_location;
-    private $id_caissier;
+    private $date_paiement;
+    private $reference;
+    private $commentaire;
+    private $statut;
     private $created_at;
     
     // Données jointes
     private $commercant_nom;
     private $etalage_numero;
-    private $caissier_nom;
     
     /**
      * Constructeur
@@ -29,16 +29,28 @@ class Paiement {
      */
     private function hydrate($data) {
         $this->id_paiement = $data['id_paiement'] ?? null;
-        $this->date_paiement = $data['date_paiement'] ?? null;
+        $this->id_location = $data['id_location'] ?? null;
         $this->montant = $data['montant'] ?? null;
         $this->mode_paiement = $data['mode_paiement'] ?? null;
-        $this->periode = $data['periode'] ?? null;
-        $this->id_location = $data['id_location'] ?? null;
-        $this->id_caissier = $data['id_caissier'] ?? null;
+        $this->date_paiement = $data['date_paiement'] ?? null;
+        $this->reference = $data['reference'] ?? null;
+        $this->commentaire = $data['commentaire'] ?? null;
+        $this->statut = $data['statut'] ?? 'valide';
         $this->created_at = $data['created_at'] ?? null;
         $this->commercant_nom = $data['commercant_nom'] ?? null;
         $this->etalage_numero = $data['etalage_numero'] ?? null;
-        $this->caissier_nom = $data['caissier_nom'] ?? null;
+    }
+    
+    /**
+     * Générer une référence unique
+     */
+    private function generateReference() {
+        $chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        $reference = '';
+        for ($i = 0; $i < 8; $i++) {
+            $reference .= $chars[rand(0, strlen($chars) - 1)];
+        }
+        return 'PY' . $reference;
     }
     
     // ============================================
@@ -50,35 +62,42 @@ class Paiement {
      */
     public function create($data) {
         // Validation
-        if (empty($data['montant']) || $data['montant'] <= 0) {
-            return ['success' => false, 'error' => 'Le montant est requis'];
-        }
         if (empty($data['id_location'])) {
             return ['success' => false, 'error' => 'La location est requise'];
         }
-        if (empty($data['mode_paiement'])) {
-            return ['success' => false, 'error' => 'Le mode de paiement est requis'];
+        if (empty($data['montant']) || $data['montant'] <= 0) {
+            return ['success' => false, 'error' => 'Le montant est requis et doit être supérieur à 0'];
         }
         
         try {
-            $sql = "INSERT INTO paiement (date_paiement, montant, mode_paiement, periode, id_location, id_caissier) 
-                    VALUES (?, ?, ?, ?, ?, ?)";
+            $reference = $this->generateReference();
+            
+            $sql = "INSERT INTO paiement (id_location, montant, mode_paiement, date_paiement, reference, commentaire, statut) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)";
             $stmt = $this->db->prepare($sql);
             $stmt->execute([
-                $data['date_paiement'] ?? date('Y-m-d'),
-                $data['montant'],
-                $data['mode_paiement'],
-                $data['periode'] ?? date('F Y'),
                 $data['id_location'],
-                $data['id_caissier'] ?? null
+                $data['montant'],
+                $data['mode_paiement'] ?? 'Espèces',
+                $data['date_paiement'] ?? date('Y-m-d H:i:s'),
+                $reference,
+                $data['commentaire'] ?? '',
+                $data['statut'] ?? 'valide'
             ]);
             
             $id = $this->db->lastInsertId();
             
+            // Mettre à jour le statut de la location si le paiement est validé
+            if (($data['statut'] ?? 'valide') === 'valide') {
+                $stmt = $this->db->prepare("UPDATE location SET status = 'actif' WHERE id_location = ?");
+                $stmt->execute([$data['id_location']]);
+            }
+            
             return [
                 'success' => true,
                 'message' => 'Paiement enregistré avec succès',
-                'id_paiement' => $id
+                'id_paiement' => $id,
+                'reference' => $reference
             ];
         } catch (PDOException $e) {
             return ['success' => false, 'error' => 'Erreur: ' . $e->getMessage()];
@@ -93,15 +112,12 @@ class Paiement {
             $stmt = $this->db->query("
                 SELECT p.*, 
                        u.nom_complet as commercant_nom,
-                       e.numero as etalage_numero,
-                       c.nom_user as caissier_nom
+                       e.numero as etalage_numero
                 FROM paiement p
                 INNER JOIN location l ON p.id_location = l.id_location
-                INNER JOIN commercant cm ON l.id_commercant = cm.id_commercant
-                INNER JOIN utilisateurs u ON cm.id_user = u.id_user
+                INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+                INNER JOIN utilisateurs u ON c.id_user = u.id_user
                 INNER JOIN etalage e ON l.id_etalage = e.id_etalage
-                LEFT JOIN caissier ca ON p.id_caissier = ca.id_caissier
-                LEFT JOIN utilisateurs c ON ca.id_user = c.id_user
                 ORDER BY p.date_paiement DESC
             ");
             return $stmt->fetchAll();
@@ -118,15 +134,12 @@ class Paiement {
             $stmt = $this->db->prepare("
                 SELECT p.*, 
                        u.nom_complet as commercant_nom,
-                       e.numero as etalage_numero,
-                       c.nom_user as caissier_nom
+                       e.numero as etalage_numero
                 FROM paiement p
                 INNER JOIN location l ON p.id_location = l.id_location
-                INNER JOIN commercant cm ON l.id_commercant = cm.id_commercant
-                INNER JOIN utilisateurs u ON cm.id_user = u.id_user
+                INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+                INNER JOIN utilisateurs u ON c.id_user = u.id_user
                 INNER JOIN etalage e ON l.id_etalage = e.id_etalage
-                LEFT JOIN caissier ca ON p.id_caissier = ca.id_caissier
-                LEFT JOIN utilisateurs c ON ca.id_user = c.id_user
                 WHERE p.id_paiement = ?
             ");
             $stmt->execute([$id_paiement]);
@@ -148,13 +161,9 @@ class Paiement {
     public function getByLocation($id_location) {
         try {
             $stmt = $this->db->prepare("
-                SELECT p.*, 
-                       u.nom_complet as caissier_nom
-                FROM paiement p
-                LEFT JOIN caissier ca ON p.id_caissier = ca.id_caissier
-                LEFT JOIN utilisateurs u ON ca.id_user = u.id_user
-                WHERE p.id_location = ?
-                ORDER BY p.date_paiement DESC
+                SELECT * FROM paiement 
+                WHERE id_location = ?
+                ORDER BY date_paiement DESC
             ");
             $stmt->execute([$id_location]);
             return $stmt->fetchAll();
@@ -195,8 +204,8 @@ class Paiement {
                        e.numero as etalage_numero
                 FROM paiement p
                 INNER JOIN location l ON p.id_location = l.id_location
-                INNER JOIN commercant cm ON l.id_commercant = cm.id_commercant
-                INNER JOIN utilisateurs u ON cm.id_user = u.id_user
+                INNER JOIN commercant c ON l.id_commercant = c.id_commercant
+                INNER JOIN utilisateurs u ON c.id_user = u.id_user
                 INNER JOIN etalage e ON l.id_etalage = e.id_etalage
                 WHERE MONTH(p.date_paiement) = ? AND YEAR(p.date_paiement) = ?
                 ORDER BY p.date_paiement DESC
@@ -214,18 +223,18 @@ class Paiement {
     public function update($id_paiement, $data) {
         try {
             $sql = "UPDATE paiement SET 
-                        date_paiement = ?,
                         montant = ?,
                         mode_paiement = ?,
-                        periode = ?
+                        commentaire = ?,
+                        statut = ?
                     WHERE id_paiement = ?";
             
             $stmt = $this->db->prepare($sql);
             $stmt->execute([
-                $data['date_paiement'],
                 $data['montant'],
-                $data['mode_paiement'],
-                $data['periode'],
+                $data['mode_paiement'] ?? 'Espèces',
+                $data['commentaire'] ?? '',
+                $data['statut'] ?? 'valide',
                 $id_paiement
             ]);
             
@@ -256,23 +265,26 @@ class Paiement {
         try {
             $stats = [];
             
-            $stmt = $this->db->query("SELECT COUNT(*) as total FROM paiement");
+            $stmt = $this->db->query("SELECT COUNT(*) as total FROM paiement WHERE statut = 'valide'");
             $stats['total'] = $stmt->fetch()['total'];
             
-            $stmt = $this->db->query("SELECT SUM(montant) as total FROM paiement");
+            $stmt = $this->db->query("SELECT SUM(montant) as total FROM paiement WHERE statut = 'valide'");
             $stats['total_montant'] = $stmt->fetch()['total'] ?? 0;
             
             $stmt = $this->db->query("
                 SELECT SUM(montant) as total 
                 FROM paiement 
-                WHERE MONTH(date_paiement) = MONTH(CURDATE()) 
+                WHERE statut = 'valide'
+                AND MONTH(date_paiement) = MONTH(CURDATE()) 
                 AND YEAR(date_paiement) = YEAR(CURDATE())
             ");
             $stats['mois_montant'] = $stmt->fetch()['total'] ?? 0;
             
+            // Paiements par mode
             $stmt = $this->db->query("
                 SELECT mode_paiement, COUNT(*) as count, SUM(montant) as total
                 FROM paiement
+                WHERE statut = 'valide'
                 GROUP BY mode_paiement
             ");
             $stats['par_mode'] = $stmt->fetchAll();
@@ -284,15 +296,15 @@ class Paiement {
     }
     
     /**
-     * Vérifier si un paiement existe pour une location et une période
+     * Vérifier si un paiement existe pour une location
      */
-    public function existsForLocation($id_location, $periode) {
+    public function existsForLocation($id_location) {
         try {
             $stmt = $this->db->prepare("
                 SELECT id_paiement FROM paiement 
-                WHERE id_location = ? AND periode = ?
+                WHERE id_location = ? AND statut = 'valide'
             ");
-            $stmt->execute([$id_location, $periode]);
+            $stmt->execute([$id_location]);
             return $stmt->fetch() !== false;
         } catch (PDOException $e) {
             return false;
@@ -304,30 +316,31 @@ class Paiement {
     // ============================================
     
     public function getIdPaiement() { return $this->id_paiement; }
-    public function getDatePaiement() { return $this->date_paiement; }
+    public function getIdLocation() { return $this->id_location; }
     public function getMontant() { return $this->montant; }
     public function getModePaiement() { return $this->mode_paiement; }
-    public function getPeriode() { return $this->periode; }
-    public function getIdLocation() { return $this->id_location; }
-    public function getIdCaissier() { return $this->id_caissier; }
+    public function getDatePaiement() { return $this->date_paiement; }
+    public function getReference() { return $this->reference; }
+    public function getCommentaire() { return $this->commentaire; }
+    public function getStatut() { return $this->statut; }
     public function getCommercantNom() { return $this->commercant_nom; }
     public function getEtalageNumero() { return $this->etalage_numero; }
-    public function getCaissierNom() { return $this->caissier_nom; }
     public function getCreatedAt() { return $this->created_at; }
     
     public function toArray() {
         return [
             'id_paiement' => $this->id_paiement,
-            'date_paiement' => $this->date_paiement,
+            'id_location' => $this->id_location,
             'montant' => $this->montant,
             'mode_paiement' => $this->mode_paiement,
-            'periode' => $this->periode,
-            'id_location' => $this->id_location,
-            'id_caissier' => $this->id_caissier,
+            'date_paiement' => $this->date_paiement,
+            'reference' => $this->reference,
+            'commentaire' => $this->commentaire,
+            'statut' => $this->statut,
+            'created_at' => $this->created_at,
             'commercant_nom' => $this->commercant_nom,
-            'etalage_numero' => $this->etalage_numero,
-            'caissier_nom' => $this->caissier_nom,
-            'created_at' => $this->created_at
+            'etalage_numero' => $this->etalage_numero
         ];
     }
 }
+?>

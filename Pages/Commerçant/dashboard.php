@@ -157,22 +157,6 @@ $total_produits = count($produits);
 $total_locations = count($locations);
 $total_paiements = array_sum(array_column($paiements, 'montant'));
 
-// En haut du dashboard.php, après la connexion
-// Récupérer les notifications non lues
-$stmt = $db->prepare("SELECT COUNT(*) as total FROM notifications WHERE id_commercant = ? AND is_read = 0");
-$stmt->execute([$id_commercant]);
-$unread_count = $stmt->fetch()['total'];
-
-// Récupérer les 5 dernières notifications non lues
-$stmt = $db->prepare("
-    SELECT * FROM notifications 
-    WHERE id_commercant = ? AND is_read = 0 
-    ORDER BY created_at DESC 
-    LIMIT 5
-");
-$stmt->execute([$id_commercant]);
-$recent_notifications = $stmt->fetchAll();
-
 $page_title = 'Dashboard - Marché Virunga';
 ?>
 <!DOCTYPE html>
@@ -202,6 +186,10 @@ $page_title = 'Dashboard - Marché Virunga';
         .btn-outline:hover { background: #1e3a5f; color: white; }
         .btn-danger { background: #ef4444; color: white; transition: all 0.3s ease; }
         .btn-danger:hover { background: #dc2626; transform: scale(1.02); }
+        .btn-info { background: #3b82f6; color: white; transition: all 0.3s ease; }
+        .btn-info:hover { background: #2563eb; transform: scale(1.02); }
+        .btn-success { background: #22c55e; color: white; transition: all 0.3s ease; }
+        .btn-success:hover { background: #16a34a; transform: scale(1.02); }
         
         .stat-card { transition: all 0.3s ease; }
         .stat-card:hover { transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
@@ -800,41 +788,167 @@ $page_title = 'Dashboard - Marché Virunga';
         <?php if (count($locations) > 0): ?>
             <div class="bg-white rounded-xl shadow-sm overflow-hidden">
                 <div class="overflow-x-auto">
-                    <table class="w-full">
+                    <table class="w-full min-w-[800px]">
                         <thead class="bg-gray-50">
                             <tr>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">#</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Étalage</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Montant</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Début</th>
                                 <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Fin</th>
-                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Statut</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Statut demande</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Paiement</th>
+                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-gray-200">
-                            <?php foreach ($locations as $location): ?>
-                                <tr class="hover:bg-gray-50">
-                                    <td class="px-4 py-3 text-sm font-medium text-gray-900">
-                                        #<?= htmlspecialchars($location['etalage_numero']) ?>
+                            <?php $num = 1; foreach ($locations as $location): ?>
+                                <tr class="hover:bg-gray-50 transition">
+                                    <td class="px-4 py-3 text-sm text-gray-500 text-center">
+                                        <?= $num++ ?>
                                     </td>
-                                    <td class="px-4 py-3 text-sm font-bold text-accent">
-                                        <?= number_format($location['montant_location'], 0, ',', ' ') ?> FCFA
+                                    
+                                    <td class="px-4 py-3">
+                                        <div>
+                                            <p class="text-sm font-medium text-gray-900">
+                                                #<?= htmlspecialchars($location['etalage_numero']) ?>
+                                            </p>
+                                            <?php if (!empty($location['etalage_localisation'])): ?>
+                                                <p class="text-xs text-gray-500">
+                                                    <i class="fas fa-map-pin mr-1"></i>
+                                                    <?= htmlspecialchars($location['etalage_localisation']) ?>
+                                                </p>
+                                            <?php endif; ?>
+                                        </div>
                                     </td>
+                                    
+                                    <td class="px-4 py-3">
+                                        <p class="text-sm font-bold text-accent">
+                                            <?= number_format($location['montant_location'], 0, ',', ' ') ?> FCFA
+                                        </p>
+                                        <p class="text-xs text-gray-400">
+                                            <?= htmlspecialchars($location['duree_location'] ?? '') ?>
+                                        </p>
+                                    </td>
+                                    
                                     <td class="px-4 py-3 text-sm text-gray-600">
                                         <?= date('d/m/Y', strtotime($location['date_debut'])) ?>
                                     </td>
+                                    
                                     <td class="px-4 py-3 text-sm text-gray-600">
                                         <?= date('d/m/Y', strtotime($location['date_fin'])) ?>
                                     </td>
+                                    
                                     <td class="px-4 py-3">
-                                        <?php if (strtotime($location['date_fin']) >= time()): ?>
-                                            <span class="bg-green-100 text-green-700 px-2 py-0.5 rounded-full text-xs font-semibold">
-                                                <i class="fas fa-check-circle mr-1"></i> Active
+                                        <?php 
+                                        $status = $location['status'] ?? 'en_attente';
+                                        $status_classes = [
+                                            'en_attente' => 'bg-yellow-100 text-yellow-800',
+                                            'approuve' => 'bg-green-100 text-green-800',
+                                            'refuse' => 'bg-red-100 text-red-800',
+                                            'annule' => 'bg-gray-100 text-gray-800',
+                                            'actif' => 'bg-blue-100 text-blue-800'
+                                        ];
+                                        $status_icones = [
+                                            'en_attente' => 'fa-clock',
+                                            'approuve' => 'fa-check-circle',
+                                            'refuse' => 'fa-times-circle',
+                                            'annule' => 'fa-ban',
+                                            'actif' => 'fa-check-circle'
+                                        ];
+                                        $status_libelles = [
+                                            'en_attente' => 'En attente',
+                                            'approuve' => 'Approuvée ✅',
+                                            'refuse' => 'Refusée ❌',
+                                            'annule' => 'Annulée',
+                                            'actif' => 'Active'
+                                        ];
+                                        ?>
+                                        <span class="px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center <?= $status_classes[$status] ?? 'bg-gray-100 text-gray-800' ?>">
+                                            <i class="fas <?= $status_icones[$status] ?? 'fa-info-circle' ?> mr-1"></i>
+                                            <?= $status_libelles[$status] ?? ucfirst($status) ?>
+                                        </span>
+                                    </td>
+                                    
+                                    <!-- Statut paiement -->
+                                    <td class="px-4 py-3">
+                                        <?php 
+                                        // Vérifier si un paiement existe
+                                        $a_paye = isset($location['id_paiement']) && $location['id_paiement'] > 0;
+                                        $date_paiement = $location['date_paiement'] ?? null;
+                                        $paiement_statut = $location['paiement_statut'] ?? null;
+                                        
+                                        if ($a_paye && $paiement_statut === 'valide'): 
+                                        ?>
+                                            <span class="bg-green-100 text-green-700 px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center">
+                                                <i class="fas fa-check-circle mr-1"></i>
+                                                Payé
+                                            </span>
+                                            <?php if ($date_paiement): ?>
+                                                <p class="text-xs text-gray-400 mt-1">
+                                                    <?= date('d/m/Y', strtotime($date_paiement)) ?>
+                                                </p>
+                                            <?php endif; ?>
+                                        <?php elseif ($a_paye && $paiement_statut !== 'valide'): ?>
+                                            <span class="bg-yellow-100 text-yellow-700 px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center">
+                                                <i class="fas fa-clock mr-1"></i>
+                                                En attente de validation
+                                            </span>
+                                        <?php elseif ($status == 'approuve' || $status == 'actif'): ?>
+                                            <span class="bg-red-100 text-red-700 px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center">
+                                                <i class="fas fa-exclamation-circle mr-1"></i>
+                                                Non payé
                                             </span>
                                         <?php else: ?>
-                                            <span class="bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full text-xs font-semibold">
-                                                <i class="fas fa-clock mr-1"></i> Expirée
+                                            <span class="bg-gray-100 text-gray-500 px-2 py-1 rounded-full text-xs font-semibold inline-flex items-center">
+                                                <i class="fas fa-minus mr-1"></i>
+                                                En attente
                                             </span>
                                         <?php endif; ?>
+                                    </td>
+                                    
+                                    <!-- Actions -->
+                                    <td class="px-4 py-3">
+                                        <div class="flex flex-wrap gap-1">
+                                            <!-- Voir détails -->
+                                            <a href="detail_location.php?id=<?= $location['id_location'] ?>" 
+                                               class="btn-info text-white p-1.5 rounded-lg text-xs transition hover:scale-110 inline-flex items-center" 
+                                               title="Voir les détails" target="_blank">
+                                                <i class="fas fa-eye"></i>
+                                            </a>
+                                            
+                                            <!-- Paiement - Visible uniquement si la demande est approuvée ou active et non payée -->
+                                            <?php if (($status == 'approuve' || $status == 'actif') && !$a_paye): ?>
+                                                <a href="paiement_location.php?id=<?= $location['id_location'] ?>" 
+                                                   class="btn-accent text-white p-1.5 rounded-lg text-xs transition hover:scale-110 inline-flex items-center" 
+                                                   title="Effectuer le paiement">
+                                                    <i class="fas fa-credit-card"></i>
+                                                </a>
+                                            <?php endif; ?>
+                                            
+                                            <!-- Reçu - Visible uniquement si payé -->
+                                            <?php if ($a_paye && $paiement_statut === 'valide'): ?>
+                                                <a href="recu_paiement.php?id=<?= $location['id_paiement'] ?>" 
+                                                   class="btn-primary text-white p-1.5 rounded-lg text-xs transition hover:scale-110 inline-flex items-center" 
+                                                   title="Voir le reçu" target="_blank">
+                                                    <i class="fas fa-receipt"></i>
+                                                </a>
+                                                <button onclick="window.open('recu_paiement.php?id=<?= $location['id_paiement'] ?>&print=1', '_blank')" 
+                                                        class="btn-success text-white p-1.5 rounded-lg text-xs transition hover:scale-110" 
+                                                        title="Imprimer le reçu">
+                                                    <i class="fas fa-print"></i>
+                                                </button>
+                                            <?php endif; ?>
+                                            
+                                            <!-- Annuler - Visible uniquement si en attente -->
+                                            <?php if ($status == 'en_attente'): ?>
+                                                <button onclick="annulerDemande(<?= $location['id_location'] ?>)" 
+                                                        class="btn-danger text-white p-1.5 rounded-lg text-xs transition hover:scale-110" 
+                                                        title="Annuler la demande">
+                                                    <i class="fas fa-times"></i>
+                                                </button>
+                                            <?php endif; ?>
+                                        </div>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -848,7 +962,10 @@ $page_title = 'Dashboard - Marché Virunga';
                     <i class="fas fa-handshake"></i>
                 </div>
                 <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune location</h3>
-                <p class="text-gray-500">Vous n'avez pas encore de location active.</p>
+                <p class="text-gray-500">Vous n'avez pas encore de location.</p>
+                <a href="dashboard.php#tab-disponibles" class="btn-accent mt-4 inline-block px-6 py-2 rounded-lg font-semibold">
+                    <i class="fas fa-search mr-2"></i> Voir les étalages disponibles
+                </a>
             </div>
         <?php endif; ?>
     </div>
@@ -856,83 +973,82 @@ $page_title = 'Dashboard - Marché Virunga';
     <!-- ============================================ -->
     <!-- TAB 5: TOUTES LES NOTIFICATIONS -->
     <!-- ============================================ -->
-  <!-- Menu déroulant des notifications -->
-<div id="content-notifications" class="tab-content hidden">
-    <div class="flex justify-between items-center mb-4">
-        <h2 class="text-xl font-bold text-primary">
-            <i class="fas fa-bell text-accent mr-2"></i>Toutes les notifications
-        </h2>
-        <div class="flex gap-2">
-            <?php if ($unread_count > 0): ?>
-                <button onclick="markAllAsRead()" class="btn-outline px-3 py-1 rounded-lg text-sm font-semibold">
-                    <i class="fas fa-check-double mr-1"></i> Tout marquer lu
-                </button>
-            <?php endif; ?>
+    <div id="content-notifications" class="tab-content hidden">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-xl font-bold text-primary">
+                <i class="fas fa-bell text-accent mr-2"></i>Toutes les notifications
+            </h2>
+            <div class="flex gap-2">
+                <?php if ($unread_count > 0): ?>
+                    <button onclick="markAllAsRead()" class="btn-outline px-3 py-1 rounded-lg text-sm font-semibold">
+                        <i class="fas fa-check-double mr-1"></i> Tout marquer lu
+                    </button>
+                <?php endif; ?>
+            </div>
         </div>
-    </div>
 
-    <?php if (count($notifications) > 0): ?>
-        <div class="bg-white rounded-xl shadow-sm overflow-hidden">
-            <div class="divide-y divide-gray-200">
-                <?php foreach ($notifications as $notif): ?>
-                    <div class="notification-tab-item p-4 <?= $notif['is_read'] ? 'bg-white' : 'bg-blue-50 border-l-4 border-accent' ?> hover:bg-gray-50 transition" data-id="<?= $notif['id_notification'] ?>">
-                        <div class="flex items-start gap-3">
-                            <div class="notif-icon <?= $notif['type'] ?> flex-shrink-0">
-                                <?php if ($notif['type'] == 'success'): ?>
-                                    <i class="fas fa-check-circle"></i>
-                                <?php elseif ($notif['type'] == 'warning'): ?>
-                                    <i class="fas fa-exclamation-triangle"></i>
-                                <?php elseif ($notif['type'] == 'error'): ?>
-                                    <i class="fas fa-times-circle"></i>
-                                <?php else: ?>
-                                    <i class="fas fa-info-circle"></i>
-                                <?php endif; ?>
-                            </div>
-                            <div class="flex-1">
-                                <div class="flex items-center justify-between">
-                                    <p class="font-semibold text-gray-800"><?= htmlspecialchars($notif['title']) ?></p>
-                                    <div class="flex gap-2">
-                                        <?php if (!$notif['is_read']): ?>
-                                            <span class="text-xs bg-accent/20 text-accent-700 px-2 py-0.5 rounded-full animate-pulse">Nouveau</span>
-                                        <?php endif; ?>
-                                        <button onclick="markAsRead(<?= $notif['id_notification'] ?>)" 
-                                                class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
-                                            <i class="fas fa-check"></i>
-                                        </button>
-                                        <button onclick="deleteNotification(<?= $notif['id_notification'] ?>)" 
-                                                class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer">
-                                            <i class="fas fa-trash"></i>
-                                        </button>
-                                    </div>
-                                </div>
-                                <p class="text-sm text-gray-600"><?= htmlspecialchars($notif['message']) ?></p>
-                                <div class="flex items-center justify-between mt-1">
-                                    <p class="text-xs text-gray-400">
-                                        <i class="far fa-clock mr-1"></i>
-                                        <?= date('d/m/Y à H:i', strtotime($notif['created_at'])) ?>
-                                    </p>
-                                    <?php if ($notif['lien']): ?>
-                                        <a href="<?= $notif['lien'] ?>" class="text-xs text-accent hover:text-accent/80 transition">
-                                            Voir plus <i class="fas fa-arrow-right ml-1"></i>
-                                        </a>
+        <?php if (count($notifications) > 0): ?>
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                <div class="divide-y divide-gray-200">
+                    <?php foreach ($notifications as $notif): ?>
+                        <div class="notification-tab-item p-4 <?= $notif['is_read'] ? 'bg-white' : 'bg-blue-50 border-l-4 border-accent' ?> hover:bg-gray-50 transition" data-id="<?= $notif['id_notification'] ?>">
+                            <div class="flex items-start gap-3">
+                                <div class="notif-icon <?= $notif['type'] ?> flex-shrink-0">
+                                    <?php if ($notif['type'] == 'success'): ?>
+                                        <i class="fas fa-check-circle"></i>
+                                    <?php elseif ($notif['type'] == 'warning'): ?>
+                                        <i class="fas fa-exclamation-triangle"></i>
+                                    <?php elseif ($notif['type'] == 'error'): ?>
+                                        <i class="fas fa-times-circle"></i>
+                                    <?php else: ?>
+                                        <i class="fas fa-info-circle"></i>
                                     <?php endif; ?>
+                                </div>
+                                <div class="flex-1">
+                                    <div class="flex items-center justify-between">
+                                        <p class="font-semibold text-gray-800"><?= htmlspecialchars($notif['title']) ?></p>
+                                        <div class="flex gap-2">
+                                            <?php if (!$notif['is_read']): ?>
+                                                <span class="text-xs bg-accent/20 text-accent-700 px-2 py-0.5 rounded-full animate-pulse">Nouveau</span>
+                                            <?php endif; ?>
+                                            <button onclick="markAsRead(<?= $notif['id_notification'] ?>)" 
+                                                    class="text-xs text-gray-400 hover:text-green-600 transition" title="Marquer comme lu">
+                                                <i class="fas fa-check"></i>
+                                            </button>
+                                            <button onclick="deleteNotification(<?= $notif['id_notification'] ?>)" 
+                                                    class="text-xs text-gray-400 hover:text-red-600 transition" title="Supprimer">
+                                                <i class="fas fa-trash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <p class="text-sm text-gray-600"><?= htmlspecialchars($notif['message']) ?></p>
+                                    <div class="flex items-center justify-between mt-1">
+                                        <p class="text-xs text-gray-400">
+                                            <i class="far fa-clock mr-1"></i>
+                                            <?= date('d/m/Y à H:i', strtotime($notif['created_at'])) ?>
+                                        </p>
+                                        <?php if ($notif['lien']): ?>
+                                            <a href="<?= $notif['lien'] ?>" class="text-xs text-accent hover:text-accent/80 transition">
+                                                Voir plus <i class="fas fa-arrow-right ml-1"></i>
+                                            </a>
+                                        <?php endif; ?>
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                <?php endforeach; ?>
+                    <?php endforeach; ?>
+                </div>
             </div>
-        </div>
-    <?php else: ?>
-        <div class="bg-white rounded-xl shadow-sm p-12 text-center">
-            <div class="text-6xl text-gray-300 mb-4">
-                <i class="fas fa-bell-slash"></i>
+        <?php else: ?>
+            <div class="bg-white rounded-xl shadow-sm p-12 text-center">
+                <div class="text-6xl text-gray-300 mb-4">
+                    <i class="fas fa-bell-slash"></i>
+                </div>
+                <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune notification</h3>
+                <p class="text-gray-500">Vous n'avez pas encore de notifications.</p>
             </div>
-            <h3 class="text-xl font-semibold text-gray-700 mb-2">Aucune notification</h3>
-            <p class="text-gray-500">Vous n'avez pas encore de notifications.</p>
-        </div>
-    <?php endif; ?>
-</div>
+        <?php endif; ?>
+    </div>
 
 </div>
 
@@ -1107,116 +1223,11 @@ $page_title = 'Dashboard - Marché Virunga';
     });
 
     // ============================================
-// GESTION AVANCÉE DES NOTIFICATIONS
-// ============================================
+    // GESTION AVANCÉE DES NOTIFICATIONS
+    // ============================================
 
-// Marquer une notification comme lue avec AJAX
-function markAsRead(notifId) {
-    fetch('/pages/Commercant/ajax/mark_notification_read.php', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'id=' + notifId
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            // Supprimer la notification du menu déroulant
-            const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
-            if (notifElement) {
-                notifElement.style.opacity = '0';
-                notifElement.style.transform = 'translateX(50px)';
-                setTimeout(() => {
-                    notifElement.remove();
-                    updateNotificationBadge();
-                }, 300);
-            }
-            // Mettre à jour l'onglet notifications
-            const tabNotif = document.querySelector(`.notification-tab-item[data-id="${notifId}"]`);
-            if (tabNotif) {
-                tabNotif.style.opacity = '0';
-                setTimeout(() => {
-                    tabNotif.remove();
-                    updateNotificationBadge();
-                }, 300);
-            }
-        }
-    })
-    .catch(error => console.error('Erreur:', error));
-}
-
-// Marquer toutes les notifications comme lues
-function markAllAsRead() {
-    if (!confirm('Marquer toutes les notifications comme lues ?')) return;
-    
-    fetch('/pages/Commercant/ajax/mark_all_read.php', {
-        method: 'POST'
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            location.reload();
-        }
-    })
-    .catch(error => console.error('Erreur:', error));
-}
-
-// Mettre à jour le badge de notification
-function updateNotificationBadge() {
-    const badge = document.querySelector('.notification-badge');
-    const notifItems = document.querySelectorAll('.notification-item.unread');
-    const count = notifItems.length;
-    
-    if (badge) {
-        if (count > 0) {
-            badge.textContent = count > 99 ? '99+' : count;
-            badge.style.display = 'flex';
-        } else {
-            badge.style.display = 'none';
-        }
-    }
-    
-    // Mettre à jour l'onglet notifications
-    const tabNotifBadge = document.querySelector('#tab-notifications .ml-1');
-    if (tabNotifBadge) {
-        if (count > 0) {
-            tabNotifBadge.textContent = count;
-            tabNotifBadge.style.display = 'inline';
-        } else {
-            tabNotifBadge.style.display = 'none';
-        }
-    }
-}
-
-// Supprimer une notification
-function deleteNotification(notifId) {
-    if (!confirm('Supprimer cette notification ?')) return;
-    
-    fetch('/pages/Commercant/ajax/delete_notification.php', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: 'id=' + notifId
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
-            if (notifElement) {
-                notifElement.remove();
-                updateNotificationBadge();
-            }
-        }
-    })
-    .catch(error => console.error('Erreur:', error));
-}
-
-// Ouvrir une notification (marquer comme lue et rediriger)
-function openNotification(notifId, lien) {
-    if (lien) {
-        // Marquer comme lue avant de rediriger
+    // Marquer une notification comme lue avec AJAX
+    function markAsRead(notifId) {
         fetch('/pages/Commercant/ajax/mark_notification_read.php', {
             method: 'POST',
             headers: {
@@ -1224,36 +1235,136 @@ function openNotification(notifId, lien) {
             },
             body: 'id=' + notifId
         })
-        .then(() => {
-            window.location.href = lien;
-        });
-    }
-}
-
-// Auto-fermeture du dropdown après clic
-document.addEventListener('click', function(e) {
-    const wrapper = document.getElementById('notificationWrapper');
-    if (wrapper && !wrapper.contains(e.target)) {
-        closeNotifications();
-    }
-});
-
-// Auto-disparition des notifications après 5 secondes (optionnel)
-function autoDismissNotifications() {
-    const notifItems = document.querySelectorAll('.notification-item.unread');
-    notifItems.forEach((item, index) => {
-        setTimeout(() => {
-            const notifId = item.dataset.id;
-            if (notifId) {
-                markAsRead(notifId);
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Supprimer la notification du menu déroulant
+                const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
+                if (notifElement) {
+                    notifElement.style.opacity = '0';
+                    notifElement.style.transform = 'translateX(50px)';
+                    setTimeout(() => {
+                        notifElement.remove();
+                        updateNotificationBadge();
+                    }, 300);
+                }
+                // Mettre à jour l'onglet notifications
+                const tabNotif = document.querySelector(`.notification-tab-item[data-id="${notifId}"]`);
+                if (tabNotif) {
+                    tabNotif.style.opacity = '0';
+                    setTimeout(() => {
+                        tabNotif.remove();
+                        updateNotificationBadge();
+                    }, 300);
+                }
             }
-        }, 5000 + (index * 1000)); // 5s + 1s par notification
-    });
-}
+        })
+        .catch(error => console.error('Erreur:', error));
+    }
 
-// Appeler autoDismissNotifications au chargement (optionnel)
-// document.addEventListener('DOMContentLoaded', autoDismissNotifications);
-    
+    // Marquer toutes les notifications comme lues
+    function markAllAsRead() {
+        if (!confirm('Marquer toutes les notifications comme lues ?')) return;
+        
+        fetch('/pages/Commercant/ajax/mark_all_read.php', {
+            method: 'POST'
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                location.reload();
+            }
+        })
+        .catch(error => console.error('Erreur:', error));
+    }
+
+    // Mettre à jour le badge de notification
+    function updateNotificationBadge() {
+        const badge = document.querySelector('.notification-badge');
+        const notifItems = document.querySelectorAll('.notification-item.unread');
+        const count = notifItems.length;
+        
+        if (badge) {
+            if (count > 0) {
+                badge.textContent = count > 99 ? '99+' : count;
+                badge.style.display = 'flex';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+        
+        // Mettre à jour l'onglet notifications
+        const tabNotifBadge = document.querySelector('#tab-notifications .ml-1');
+        if (tabNotifBadge) {
+            if (count > 0) {
+                tabNotifBadge.textContent = count;
+                tabNotifBadge.style.display = 'inline';
+            } else {
+                tabNotifBadge.style.display = 'none';
+            }
+        }
+    }
+
+    // Supprimer une notification
+    function deleteNotification(notifId) {
+        if (!confirm('Supprimer cette notification ?')) return;
+        
+        fetch('/pages/Commercant/ajax/delete_notification.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'id=' + notifId
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                const notifElement = document.querySelector(`.notification-item[data-id="${notifId}"]`);
+                if (notifElement) {
+                    notifElement.remove();
+                    updateNotificationBadge();
+                }
+            }
+        })
+        .catch(error => console.error('Erreur:', error));
+    }
+
+    // Ouvrir une notification (marquer comme lue et rediriger)
+    function openNotification(notifId, lien) {
+        if (lien) {
+            // Marquer comme lue avant de rediriger
+            fetch('/pages/Commercant/ajax/mark_notification_read.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'id=' + notifId
+            })
+            .then(() => {
+                window.location.href = lien;
+            });
+        }
+    }
+
+    // Auto-fermeture du dropdown après clic
+    document.addEventListener('click', function(e) {
+        const wrapper = document.getElementById('notificationWrapper');
+        if (wrapper && !wrapper.contains(e.target)) {
+            closeNotifications();
+        }
+    });
+
+    // ============================================
+    // GESTION DES PAIEMENTS
+    // ============================================
+
+    // Annuler une demande
+    function annulerDemande(id) {
+        if (confirm('Êtes-vous sûr de vouloir annuler cette demande de location ?')) {
+            window.location.href = 'annuler_location.php?id=' + id;
+        }
+    }
+
     // Si un message de succès est affiché, fermer le modal automatiquement
     <?php if ($message_type === 'success'): ?>
         setTimeout(function() {

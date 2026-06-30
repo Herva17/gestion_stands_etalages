@@ -411,20 +411,30 @@ class Commercant {
     }
     
     /**
-     * Récupérer les locations du commerçant
+     * Récupérer les locations du commerçant avec les paiements
      */
     public function getLocations($id_commercant) {
         try {
             $stmt = $this->db->prepare("
-                SELECT l.*, e.numero as etalage_numero, e.localisation
+                SELECT l.*, 
+                       e.numero as etalage_numero, 
+                       e.localisation as etalage_localisation,
+                       p.id_paiement,
+                       p.montant as montant_paye,
+                       p.date_paiement,
+                       p.reference as paiement_reference,
+                       p.statut as paiement_statut,
+                       p.mode_paiement
                 FROM location l
                 INNER JOIN etalage e ON l.id_etalage = e.id_etalage
+                LEFT JOIN paiement p ON l.id_location = p.id_location
                 WHERE l.id_commercant = ?
-                ORDER BY l.date_debut DESC
+                ORDER BY l.created_at DESC
             ");
             $stmt->execute([$id_commercant]);
             return $stmt->fetchAll();
         } catch (PDOException $e) {
+            error_log("Erreur dans getLocations: " . $e->getMessage());
             return [];
         }
     }
@@ -640,3 +650,4 @@ class Commercant {
         ];
     }
 }
+?>
