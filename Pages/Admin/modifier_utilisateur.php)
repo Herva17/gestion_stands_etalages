@@ -1,9 +1,9 @@
 <?php
 session_start();
-require_once __DIR__ . '/../../Classes/Admin.php';
+require_once __DIR__ . '/../../Classes/Administrateur.php';
 require_once __DIR__ . '/../../Classes/Database.php';
 
-$admin = new Admin();
+$admin = new Administrateur();
 if (!$admin->isLoggedIn()) {
     header('Location: ../../login.php');
     exit;
@@ -16,63 +16,87 @@ if (!$user) {
     exit;
 }
 
+$user_id = $_GET['id'] ?? 0;
+if (!$user_id) {
+    header('Location: gestion_utilisateurs.php?error=id_manquant');
+    exit;
+}
+
 $db = Database::getInstance()->getConnection();
+
+// Récupérer l'utilisateur
+$stmt = $db->prepare("
+    SELECT u.*, 
+           c.id_commercant as is_commercant,
+           a.id_admin as is_admin,
+           ag.id_agent as is_agent
+    FROM utilisateurs u
+    LEFT JOIN commercant c ON u.id_user = c.id_user
+    LEFT JOIN admin a ON u.id_user = a.id_user
+    LEFT JOIN agent_marche ag ON u.id_user = ag.id_user
+    WHERE u.id_user = ?
+");
+$stmt->execute([$user_id]);
+$utilisateur = $stmt->fetch();
+
+if (!$utilisateur) {
+    header('Location: gestion_utilisateurs.php?error=utilisateur_introuvable');
+    exit;
+}
+
 $error = '';
 $success = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $nom_complet = $_POST['nom_complet'] ?? '';
-    $nom_user = $_POST['nom_user'] ?? '';
-    $mot_de_passe = $_POST['mot_de_passe'] ?? '';
     $telephone = $_POST['telephone'] ?? '';
     $email = $_POST['email'] ?? '';
-    $role = $_POST['role'] ?? 'commercant';
+    $role = $_POST['role'] ?? '';
     $sexe = $_POST['sexe'] ?? 'Masculin';
     $nationalite = $_POST['nationalite'] ?? 'Congolaise';
     $adresse = $_POST['adresse'] ?? '';
     $date_naissance = $_POST['date_naissance'] ?? null;
+    $mot_de_passe = $_POST['mot_de_passe'] ?? '';
     
-    if (empty($nom_complet) || empty($nom_user) || empty($mot_de_passe)) {
+    if (empty($nom_complet) || empty($role)) {
         $error = 'Veuillez remplir tous les champs obligatoires.';
     } else {
         try {
             $db->beginTransaction();
             
-            // Vérifier si le nom d'utilisateur existe
-            $stmt = $db->prepare("SELECT id_user FROM utilisateurs WHERE nom_user = ?");
-            $stmt->execute([$nom_user]);
-            if ($stmt->fetch()) {
-                throw new Exception('Ce nom d\'utilisateur existe déjà.');
+            // Mettre à jour l'utilisateur
+            $sql = "UPDATE utilisateurs SET 
+                        nom_complet = ?,
+                        sexe = ?,
+                        nationalite = ?,
+                        date_naissance = ?,
+                        adresse = ?,
+                        telephone = ?,
+                        email = ?";
+            
+            $params = [$nom_complet, $sexe, $nationalite, $date_naissance, $adresse, $telephone, $email];
+            
+            if (!empty($mot_de_passe)) {
+                $sql .= ", mot_de_passe = ?";
+                $params[] = password_hash($mot_de_passe, PASSWORD_DEFAULT);
             }
             
-            if (!empty($email)) {
-                $stmt = $db->prepare("SELECT id_user FROM utilisateurs WHERE email = ?");
-                $stmt->execute([$email]);
-                if ($stmt->fetch()) {
-                    throw new Exception('Cet email existe déjà.');
-                }
-            }
+            $sql .= " WHERE id_user = ?";
+            $params[] = $user_id;
             
-            // Générer un matricule
-            $matricule = $this->generateMatricule();
+            $stmt = $db->prepare($sql);
+            $stmt->execute($params);
             
-            // Hasher le mot de passe
-            $hashed_password = password_hash($mot_de_passe, PASSWORD_DEFAULT);
+            // Mettre à jour le rôle
+            // Supprimer les anciens rôles
+            $stmt = $db->prepare("DELETE FROM commercant WHERE id_user = ?");
+            $stmt->execute([$user_id]);
+            $stmt = $db->prepare("DELETE FROM agent_marche WHERE id_user = ?");
+            $stmt->execute([$user_id]);
+            $stmt = $db->prepare("DELETE FROM admin WHERE id_user = ?");
+            $stmt->execute([$user_id]);
             
-            // Insérer l'utilisateur
-            $stmt = $db->prepare("
-                INSERT INTO utilisateurs (nom_complet, sexe, nationalite, date_naissance, adresse, 
-                                         matricule, nom_user, mot_de_passe, telephone, email)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ");
-            $stmt->execute([
-                $nom_complet, $sexe, $nationalite, $date_naissance, $adresse,
-                $matricule, $nom_user, $hashed_password, $telephone, $email
-            ]);
-            
-            $user_id = $db->lastInsertId();
-            
-            // Attribuer le rôle
+            // Attribuer le nouveau rôle
             switch ($role) {
                 case 'commercant':
                     $stmt = $db->prepare("INSERT INTO commercant (id_user) VALUES (?)");
@@ -89,7 +113,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             
             $db->commit();
-            $success = "Utilisateur créé avec succès ! Matricule: $matricule";
+            $success = "Utilisateur modifié avec succès !";
             
         } catch (Exception $e) {
             $db->rollBack();
@@ -98,23 +122,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-function generateMatricule() {
-    global $db;
-    $prefix = 'USR';
-    $year = date('Y');
-    $random = rand(1000, 9999);
-    $matricule = $prefix . $year . $random;
-    
-    $stmt = $db->prepare("SELECT id_user FROM utilisateurs WHERE matricule = ?");
-    $stmt->execute([$matricule]);
-    
-    if ($stmt->fetch()) {
-        return generateMatricule();
-    }
-    return $matricule;
-}
-
-$page_title = 'Ajouter un utilisateur - Admin';
+$page_title = 'Modifier un utilisateur - Admin';
 ?>
 
 <!DOCTYPE html>
@@ -136,8 +144,6 @@ $page_title = 'Ajouter un utilisateur - Admin';
         .text-accent { color: #f59e0b; }
         .btn-accent { background: #f59e0b; color: white; transition: all 0.3s ease; }
         .btn-accent:hover { background: #d97706; transform: scale(1.02); }
-        .btn-primary { background: #1e3a5f; color: white; transition: all 0.3s ease; }
-        .btn-primary:hover { background: #2d6a9f; transform: scale(1.02); }
         .input-focus:focus {
             border-color: #f59e0b;
             box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
@@ -171,8 +177,14 @@ $page_title = 'Ajouter un utilisateur - Admin';
 <div class="max-w-2xl mx-auto px-4 py-8">
     <div class="bg-white rounded-xl shadow-sm p-6">
         <h1 class="text-2xl font-bold text-primary mb-6">
-            <i class="fas fa-user-plus text-accent mr-2"></i>Ajouter un utilisateur
+            <i class="fas fa-user-edit text-accent mr-2"></i>Modifier l'utilisateur
         </h1>
+        
+        <div class="bg-gray-50 rounded-lg p-3 mb-4">
+            <p class="text-sm text-gray-600">
+                <span class="font-medium">Matricule:</span> <?= htmlspecialchars($utilisateur['matricule']) ?>
+            </p>
+        </div>
         
         <?php if ($error): ?>
             <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-4">
@@ -193,45 +205,26 @@ $page_title = 'Ajouter un utilisateur - Admin';
                             Nom complet <span class="text-red-500">*</span>
                         </label>
                         <input type="text" name="nom_complet" required
-                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                               placeholder="Jean Dupont">
+                               value="<?= htmlspecialchars($utilisateur['nom_complet']) ?>"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">
-                            Nom d'utilisateur <span class="text-red-500">*</span>
-                        </label>
-                        <input type="text" name="nom_user" required
-                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                               placeholder="jdupont">
-                    </div>
-                </div>
-                
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-1">
-                        Mot de passe <span class="text-red-500">*</span>
-                    </label>
-                    <input type="password" name="mot_de_passe" required
-                           class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                           placeholder="********">
-                </div>
-                
-                <div class="grid grid-cols-2 gap-4">
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">
                             Téléphone <span class="text-red-500">*</span>
                         </label>
                         <input type="tel" name="telephone" required
-                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                               placeholder="0123456789">
+                               value="<?= htmlspecialchars($utilisateur['telephone']) ?>"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                     </div>
-                    <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1">
-                            Email
-                        </label>
-                        <input type="email" name="email"
-                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                               placeholder="jean@email.com">
-                    </div>
+                </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Email
+                    </label>
+                    <input type="email" name="email"
+                           value="<?= htmlspecialchars($utilisateur['email']) ?>"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                 </div>
                 
                 <div class="grid grid-cols-2 gap-4">
@@ -240,8 +233,8 @@ $page_title = 'Ajouter un utilisateur - Admin';
                             Sexe
                         </label>
                         <select name="sexe" class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
-                            <option value="Masculin">Masculin</option>
-                            <option value="Féminin">Féminin</option>
+                            <option value="Masculin" <?= $utilisateur['sexe'] == 'Masculin' ? 'selected' : '' ?>>Masculin</option>
+                            <option value="Féminin" <?= $utilisateur['sexe'] == 'Féminin' ? 'selected' : '' ?>>Féminin</option>
                         </select>
                     </div>
                     <div>
@@ -249,8 +242,8 @@ $page_title = 'Ajouter un utilisateur - Admin';
                             Nationalité
                         </label>
                         <input type="text" name="nationalite"
-                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                               placeholder="Congolaise">
+                               value="<?= htmlspecialchars($utilisateur['nationalite']) ?>"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                     </div>
                 </div>
                 
@@ -259,8 +252,8 @@ $page_title = 'Ajouter un utilisateur - Admin';
                         Adresse
                     </label>
                     <input type="text" name="adresse"
-                           class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
-                           placeholder="Adresse complète">
+                           value="<?= htmlspecialchars($utilisateur['adresse']) ?>"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                 </div>
                 
                 <div>
@@ -268,6 +261,7 @@ $page_title = 'Ajouter un utilisateur - Admin';
                         Date de naissance
                     </label>
                     <input type="date" name="date_naissance"
+                           value="<?= htmlspecialchars($utilisateur['date_naissance']) ?>"
                            class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
                 </div>
                 
@@ -276,14 +270,23 @@ $page_title = 'Ajouter un utilisateur - Admin';
                         Rôle <span class="text-red-500">*</span>
                     </label>
                     <select name="role" required class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none">
-                        <option value="commercant">Commerçant</option>
-                        <option value="agent">Agent</option>
-                        <option value="admin">Administrateur</option>
+                        <option value="commercant" <?= $utilisateur['is_commercant'] ? 'selected' : '' ?>>Commerçant</option>
+                        <option value="agent" <?= $utilisateur['is_agent'] ? 'selected' : '' ?>>Agent</option>
+                        <option value="admin" <?= $utilisateur['is_admin'] ? 'selected' : '' ?>>Administrateur</option>
                     </select>
                 </div>
                 
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        Nouveau mot de passe (laisser vide pour ne pas modifier)
+                    </label>
+                    <input type="password" name="mot_de_passe"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg input-focus focus:outline-none"
+                           placeholder="********">
+                </div>
+                
                 <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">
-                    <i class="fas fa-save mr-2"></i> Créer l'utilisateur
+                    <i class="fas fa-save mr-2"></i> Modifier l'utilisateur
                 </button>
             </form>
         <?php endif; ?>

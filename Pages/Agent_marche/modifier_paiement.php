@@ -33,7 +33,7 @@ $success = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $montant = $_POST['montant'] ?? 0;
     $mode_paiement = $_POST['mode_paiement'] ?? 'Espèces';
-    $periode = $_POST['periode'] ?? '';
+    $date_paiement = $_POST['date_paiement'] ?? date('Y-m-d');
     $description = $_POST['description'] ?? '';
     
     if (!$montant) {
@@ -42,10 +42,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
             $stmt = $db->prepare("
                 UPDATE paiement 
-                SET montant = ?, mode_paiement = ?, periode = ?, description = ?
+                SET montant = ?, mode_paiement = ?, date_paiement = ?, commentaire = ?
                 WHERE id_paiement = ?
             ");
-            $stmt->execute([$montant, $mode_paiement, $periode, $description, $paiement_id]);
+            $stmt->execute([$montant, $mode_paiement, $date_paiement, $description, $paiement_id]);
             $success = 'Paiement modifié avec succès !';
         } catch (Exception $e) {
             $error = 'Erreur: ' . $e->getMessage();
@@ -123,9 +123,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">
-                            Période
+                            Date de paiement
                         </label>
-                        <input type="month" name="periode" value="<?= htmlspecialchars($paiement['periode'] ?? date('Y-m')) ?>"
+                        <input type="date" name="date_paiement" 
+                               value="<?= htmlspecialchars($paiement['date_paiement'] ?? date('Y-m-d')) ?>"
                                class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none">
                     </div>
                     
@@ -134,7 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             Description
                         </label>
                         <textarea name="description" rows="2"
-                                  class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"><?= htmlspecialchars($paiement['description'] ?? '') ?></textarea>
+                                  class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:border-accent focus:outline-none"><?= htmlspecialchars($paiement['commentaire'] ?? '') ?></textarea>
                     </div>
                     
                     <button type="submit" class="w-full btn-accent py-2 rounded-lg font-semibold">

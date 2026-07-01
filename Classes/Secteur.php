@@ -28,9 +28,14 @@ class Secteur {
     // ============================================
     
     /**
-     * Créer un secteur
+     * Créer un secteur - Accepte soit une chaîne, soit un tableau
      */
     public function create($designation) {
+        // Si c'est un tableau, extraire la désignation
+        if (is_array($designation)) {
+            $designation = $designation['designation'] ?? '';
+        }
+        
         if (empty($designation)) {
             return ['success' => false, 'error' => 'La désignation est requise'];
         }
@@ -95,9 +100,14 @@ class Secteur {
     }
     
     /**
-     * Mettre à jour un secteur
+     * Mettre à jour un secteur - Accepte soit une chaîne, soit un tableau
      */
     public function update($id_secteur, $designation) {
+        // Si c'est un tableau, extraire la désignation
+        if (is_array($designation)) {
+            $designation = $designation['designation'] ?? '';
+        }
+        
         if (empty($designation)) {
             return ['success' => false, 'error' => 'La désignation est requise'];
         }
@@ -142,7 +152,7 @@ class Secteur {
         try {
             $stmt = $this->db->prepare("
                 SELECT e.*, 
-                       u.nom_complet as commerçant_nom
+                       u.nom_complet as commercant_nom
                 FROM etalage e
                 LEFT JOIN commercant c ON e.id_commercant = c.id_commercant
                 LEFT JOIN utilisateurs u ON c.id_user = u.id_user
@@ -172,3 +182,4 @@ class Secteur {
         ];
     }
 }
+?>

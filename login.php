@@ -1,34 +1,35 @@
 <?php
 // Page de connexion universelle
+ini_set('session.gc_maxlifetime', 86400);
+ini_set('session.cookie_lifetime', 86400);
+session_start();
+
 require_once __DIR__ . '/Classes/Commercant.php';
 require_once __DIR__ . '/Classes/AgentMarche.php';
+// CHANGER: inclure Administrateur.php au lieu de Admin.php
 require_once __DIR__ . '/Classes/Administrateur.php';
 require_once __DIR__ . '/Classes/Database.php';
 
 $page_title = 'Connexion - Marché Virunga';
 
-// Initialiser la variable d'erreur
 $error = null;
 $error_detail = null;
 
-// Si le formulaire est soumis
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $nom_user = $_POST['nom_user'] ?? '';
     $mot_de_passe = $_POST['mot_de_passe'] ?? '';
     $remember = isset($_POST['remember']);
     
-    // Validation
     if (empty($nom_user) || empty($mot_de_passe)) {
         $error = 'empty';
     } else {
         try {
             // 1. Vérifier d'abord si c'est un administrateur
-            $admin = new Administrateur();
+            $admin = new Administrateur(); // Utiliser Administrateur
             $result = $admin->login($nom_user, $mot_de_passe);
             
             if ($result['success']) {
-                // Rediriger vers le dashboard admin
-                header('Location: /pages/Admin/dashboard.php');
+                header('Location: Pages/Admin/dashboard.php');
                 exit;
             }
             
@@ -37,8 +38,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = $agent->login($nom_user, $mot_de_passe);
             
             if ($result['success']) {
-                // Rediriger vers le dashboard agent
-                header('Location: ./pages/Agent_marche/dashboard.php');
+                header('Location: Pages/Agent_marche/dashboard.php');
                 exit;
             }
             
@@ -47,12 +47,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $result = $commercant->login($nom_user, $mot_de_passe);
             
             if ($result['success']) {
-                // Rediriger vers le dashboard commerçant
-                header('Location: ./pages/Commerçant/dashboard.php');
+                header('Location: Pages/Commercant/dashboard.php');
                 exit;
             }
             
-            // Si aucun rôle ne correspond
             $error = 'not_found';
             $error_detail = 'Aucun compte trouvé avec ces identifiants. Vérifiez vos informations.';
             
@@ -62,6 +60,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 }
+
+$session_error = isset($_GET['error']) ? $_GET['error'] : null;
 ?>
 <!DOCTYPE html>
 <html lang="fr">
@@ -70,13 +70,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><?= $page_title ?></title>
     
-    <!-- Tailwind CSS via CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    
-    <!-- Font Awesome -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    
-    <!-- Google Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
     
     <style>
@@ -95,12 +90,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .auth-card { transition: all 0.3s ease; }
         .auth-card:hover { box-shadow: 0 20px 40px rgba(0,0,0,0.1); }
         
-        /* Rôle selector */
         .role-selector {
             display: flex;
             gap: 0.5rem;
             justify-content: center;
             margin-bottom: 1.5rem;
+            flex-wrap: wrap;
         }
         .role-btn {
             padding: 0.5rem 1rem;
@@ -129,7 +124,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <div class="min-h-screen flex items-center justify-center py-12 px-4">
     <div class="max-w-md w-full">
-        <!-- Logo -->
         <div class="text-center mb-8">
             <div class="inline-flex items-center space-x-2">
                 <div class="w-12 h-12 bg-primary rounded-xl flex items-center justify-center">
@@ -144,7 +138,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <p class="text-gray-500 text-sm mt-1">Connectez-vous à votre espace</p>
         </div>
         
-        <!-- Message d'erreur -->
+        <?php if ($session_error === 'session_expired'): ?>
+            <div class="bg-yellow-50 border border-yellow-200 text-yellow-700 px-4 py-3 rounded-lg mb-4 text-sm">
+                <i class="fas fa-clock mr-2"></i>
+                Votre session a expiré. Veuillez vous reconnecter.
+            </div>
+        <?php endif; ?>
+        
         <?php if (isset($error)): ?>
             <div class="bg-red-50 border border-red-200 text-red-600 px-4 py-3 rounded-lg mb-4 text-sm">
                 <i class="fas fa-exclamation-circle mr-2"></i>
@@ -162,7 +162,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
         <?php endif; ?>
         
-        <!-- Message de succès (après inscription) -->
         <?php if (isset($_GET['success'])): ?>
             <?php if ($_GET['success'] === 'register'): ?>
                 <div class="bg-green-50 border border-green-200 text-green-600 px-4 py-3 rounded-lg mb-4 text-sm">
@@ -177,10 +176,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <?php endif; ?>
         <?php endif; ?>
         
-        <!-- Formulaire de connexion -->
         <div class="bg-white rounded-2xl shadow-lg p-8 auth-card">
-            
-            <!-- Sélecteur de rôle (purement visuel) -->
             <div class="role-selector">
                 <button type="button" class="role-btn active" onclick="selectRole('tous')" id="role-tous">
                     <i class="fas fa-users icon"></i>Tous
@@ -228,7 +224,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                class="w-4 h-4 text-accent border-gray-300 rounded focus:ring-accent">
                         <label for="remember" class="ml-2 text-sm text-gray-600">Se souvenir de moi</label>
                     </div>
-                    <a href="/pages/Client/forgot-password.php" class="text-sm text-accent hover:text-accent-hover font-medium">
+                    <a href="forgot-password.php" class="text-sm text-accent hover:text-accent-hover font-medium">
                         Mot de passe oublié ?
                     </a>
                 </div>
@@ -247,7 +243,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 </p>
             </div>
             
-            <!-- Lien retour accueil -->
             <div class="mt-4 text-center">
                 <a href="index.php" class="text-sm text-gray-400 hover:text-gray-600 transition">
                     <i class="fas fa-arrow-left mr-1"></i>Retour à l'accueil
@@ -255,7 +250,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
         </div>
         
-        <!-- Mentions -->
         <div class="text-center mt-6 text-xs text-gray-400">
             <p>© <?= date('Y') ?> Marché Virunga - Gestion du marché</p>
         </div>
@@ -263,7 +257,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </div>
 
 <script>
-    // Afficher/masquer le mot de passe
     function togglePassword() {
         const password = document.getElementById('password');
         const icon = document.getElementById('eye-icon');
@@ -276,15 +269,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
     
-    // Sélection du rôle (effet visuel uniquement)
     function selectRole(role) {
-        // Mettre à jour les boutons
         document.querySelectorAll('.role-btn').forEach(btn => {
             btn.classList.remove('active');
         });
         document.getElementById('role-' + role).classList.add('active');
         
-        // Mettre à jour le placeholder du champ nom d'utilisateur
         const input = document.querySelector('input[name="nom_user"]');
         const placeholders = {
             'tous': 'Entrez votre nom d\'utilisateur ou email',
